@@ -1,0 +1,19 @@
+# Login test YAML definition
+
+- test_id: "TC001_Admin_Login_Success"
+  description: "Verify that an admin user can log in successfully"
+  endpoint: "/auth/login"
+  method: "POST"
+  headers:
+    Content-Type: "application/json"
+  payload: '{"username": "admin", "password": "password"}'
+  auth: "none"
+
+- test_id: "TC002_Admin_Login_Failure"
+  description: "Verify that login fails with an incorrect password"
+  endpoint: "/auth/login"
+  method: "POST"
+  headers:
+    Content-Type: "application/json"
+  payload: '{"username": "admin", "password": "wrongpassword"}'
+  auth: "none"

@@ -1,0 +1,11 @@
+{
+  "TC001_Admin_Login_Success": {
+    "status": 200,
+    "body": {
+      "should_contain_key": "token"
+    }
+  },
+  "TC002_Admin_Login_Failure": {
+    "status": 403
+  }
+}

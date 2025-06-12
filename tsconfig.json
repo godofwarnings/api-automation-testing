@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES6",
+    "module": "commonjs",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "./dist",
+    "baseUrl": ".",
+    "paths": {
+      "@/core/*": [
+        "src/core/*"
+      ],
+      "@/helpers/*": [
+        "src/helpers/*"
+      ],
+      "@/types/*": [
+        "src/types/*"
+      ],
+      "@/tests/*": [
+        "tests/*"
+      ]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts"
+  ]
+}
