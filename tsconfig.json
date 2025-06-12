@@ -9,22 +9,11 @@
     "outDir": "./dist",
     "baseUrl": ".",
     "paths": {
-      "@/core/*": [
-        "src/core/*"
-      ],
-      "@/helpers/*": [
-        "src/helpers/*"
-      ],
-      "@/types/*": [
-        "src/types/*"
-      ],
-      "@/tests/*": [
-        "tests/*"
-      ]
+      "@/core/*": ["src/core/*"],
+      "@/helpers/*": ["src/helpers/*"],
+      "@/types/*": ["src/types/*"],
+      "@/tests/*": ["tests/*"]
     }
   },
-  "include": [
-    "src/**/*.ts",
-    "tests/**/*.ts"
-  ]
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
 }

@@ -1,0 +1,15 @@
+parameters:
+  - field: StateCode
+    values: ["CA", "NY"]
+  - field: CoverageAmount
+    values: [100000, 500000, 1000000]
+  - field: IsNewCustomer
+    values: [true, false]
+
+# Rules for how to generate the corresponding expected responses.
+# For now, we'll keep it simple: all successful tests expect a 201 status.
+expected_response:
+  success:
+    status: 201
+    body:
+      should_contain_key: "quoteId"

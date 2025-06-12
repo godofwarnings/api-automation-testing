@@ -1,0 +1,31 @@
+# Central config for envs, partners, credentials
+# Central configuration for all test environments and partners
+default_env: &default_env
+  authUrl: "/auth/v1/token" # Example auth endpoint
+
+sit:
+  <<: *default_env
+  baseUrl: "https://nasit.your-api-domain.com"
+  partners:
+    partner_a:
+      app_id: "sit_partner_a_id"
+      app_key: ${SIT_PARTNER_A_KEY} # Securely loaded from .env or CI secrets
+    partner_b:
+      app_id: "sit_partner_b_id"
+      app_key: ${SIT_PARTNER_B_KEY}
+
+uat:
+  <<: *default_env
+  baseUrl: "https://nauat.your-api-domain.com"
+  partners:
+    partner_a:
+      app_id: "uat_partner_a_id"
+      app_key: ${UAT_PARTNER_A_KEY}
+
+production:
+  <<: *default_env
+  baseUrl: "https://your-api-domain.com"
+  partners:
+    partner_a:
+      app_id: "prod_partner_a_id"
+      app_key: ${PROD_PARTNER_A_KEY}

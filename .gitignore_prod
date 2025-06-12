@@ -1,0 +1,10 @@
+payloads/_generated_/
+reports/
+node_modules/
+dist/
+
+# Authentication state
+.auth/
+
+# Local environment variables
+.env

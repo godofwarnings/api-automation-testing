@@ -1,13 +1,15 @@
-# Login test YAML definition
-
 - test_id: "TC001_Admin_Login_Success"
-  description: "Verify that an admin user can log in successfully"
+  description: "Verify that an admin user can log in successfully with XML payload"
   endpoint: "/auth/login"
   method: "POST"
+  auth: "none" # This test provides credentials, no prior auth needed
   headers:
-    Content-Type: "application/json"
-  payload: '{"username": "admin", "password": "password"}'
-  auth: "none"
+    Content-Type: "application/xml"
+  payload: "file://payloads/login-success.xml" # <-- Use the file protocol
+  # This new 'chaining' section tells the framework what to do with the response
+  chaining:
+    set_global:
+      authToken: "body.token" # Extracts 'token' from the response body and saves it
 
 - test_id: "TC002_Admin_Login_Failure"
   description: "Verify that login fails with an incorrect password"

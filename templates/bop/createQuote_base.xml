@@ -1,0 +1,17 @@
+      
+<QuoteRequest>
+  <Product>BOP</Product>
+  <State>{{StateCode}}</State>
+  <BusinessInfo>
+    <Industry>Retail</Industry>
+    <YearsInBusiness>5</YearsInBusiness>
+  </BusinessInfo>
+  <Coverages>
+    <GeneralLiability>
+      <Limit>{{CoverageAmount}}</Limit>
+    </GeneralLiability>
+  </Coverages>
+  <IsNewCustomer>{{IsNewCustomer}}</IsNewCustomer>
+</QuoteRequest>
+
+    
