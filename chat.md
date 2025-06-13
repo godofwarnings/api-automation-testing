@@ -295,3 +295,136 @@ The previous `yargs(hideBin(process.argv))` without the direct `yargs()` import 
 This should now correctly parse `product` as "bop" and `api` as "createQuote", and the script should proceed without the "Missing required arguments" error.
 
 Let me know if this resolves the issue!
+
+
+Okay, that's frustrating. If it's still giving "Missing required arguments," let's try a slightly different but common approach for `yargs` with npm scripts and also ensure the `package.json` script is definitely passing them correctly.
+
+**Possibility 1: `npm` script argument passing nuance**
+
+Sometimes, depending on the shell or exact npm version, the argument parsing can be tricky.
+Let's first ensure your `package.json` script for `generate:tests` is robust.
+
+In your `package.json`, your script is:
+```json
+"generate:tests": "ts-node src/core/test-generator.ts",
+```
+When you run `npm run generate:tests -- --product=bop --api=createQuote`, the arguments `--product=bop --api=createQuote` *should* be appended to the `ts-node src/core/test-generator.ts` command.
+
+**Possibility 2: `yargs` configuration depth**
+
+Let's try a very explicit `yargs` setup.
+
+---
+
+**Revised `src/core/test-generator.ts` (Focus on `yargs` Robustness)**
+
+```typescript
+import * as fs from 'fs';
+import * as path from 'path';
+import * as yaml from 'js-yaml';
+// Keep this import as it was before, if the yargs/yargs didn't help.
+import yargs from 'yargs';
+import { hideBin } from 'yargs/helpers';
+
+
+// ... (interfaces and generateCombinations function remain the same) ...
+
+// --- Main Generator Logic ---
+async function generateTests() {
+  // 1. Parse CLI arguments
+  // Let's make yargs configuration very explicit
+  const argv = yargs(hideBin(process.argv))
+    .command('$0 <product> <api>', 'Generate API tests', (yargsInstance) => {
+        // Define positional arguments if we want them, but options are generally better for named args.
+        // For now, sticking to options.
+    })
+    .option('product', {
+        alias: 'p',
+        describe: 'Product code (e.g., bop)',
+        type: 'string',
+        demandOption: true, // This is what triggers "Missing required arguments"
+    })
+    .option('api', {
+        alias: 'a',
+        describe: 'API name (e.g., createQuote)',
+        type: 'string',
+        demandOption: true, // This is what triggers "Missing required arguments"
+    })
+    .help()
+    .alias('help', 'h')
+    .strict() // Important for catching typos in arguments
+    .argv; // Use .argv (synchronous) or .parse() / .parseAsync()
+
+
+  // Yargs might return a promise if certain middleware is used, or if using parseAsync.
+  // Awaiting it is safer if there's any doubt.
+  const resolvedArgv = await argv;
+
+  const { product, api } = resolvedArgv;
+
+  if (!product || !api) {
+    console.error("Error: Product and API arguments are required.");
+    // yargs should handle this with demandOption, but an extra check.
+    process.exit(1);
+  }
+
+  console.log(`Generating tests for Product: ${product}, API: ${api}`);
+
+  // ... (rest of the generateTests function remains the same) ...
+  // Ensure the rest of your function uses `product` and `api` as parsed.
+}
+
+// ... (call to generateTests() and error handling remain the same) ...
+```
+
+**Key Changes in this Attempt:**
+
+1.  **`import yargs from 'yargs';`**: Went back to the simpler import, as the `yargs/yargs` one might not have been the core issue if the problem persists.
+2.  **Explicit `.option()` calls:**
+    *   We are explicitly defining `product` and `api` as options.
+    *   `demandOption: true` is what causes `yargs` to throw the "Missing required arguments" error if they are not found.
+3.  **`.argv` Property:** Using `.argv` to get the parsed arguments. This is often a synchronous property unless specific async middleware or `.parseAsync()` is used. Awaiting `argv` (as `resolvedArgv = await argv;`) handles cases where `argv` might be a promise due to yargs internals or extensions.
+4.  **Redundant Check (for debugging):** Added a manual `if (!product || !api)` check after parsing. If `yargs` fails to parse them, these will be undefined, and this check will catch it, confirming `yargs` is the issue.
+
+**Debugging Steps if it Still Fails:**
+
+1.  **Simplify the npm script temporarily:**
+    In `package.json`, change:
+    ```json
+    "generate:tests": "ts-node src/core/test-generator.ts --product=testprod --api=testapi",
+    ```
+    Then run:
+    ```bash
+    npm run generate:tests
+    ```
+    Does this work? If so, the issue is definitely how `npm run ... -- ...` is passing arguments versus how `yargs` expects them when invoked that way.
+
+2.  **Log `process.argv`:**
+    At the very beginning of your `test-generator.ts` (before `yargs`), add:
+    ```typescript
+    console.log("Raw arguments received by script:", process.argv);
+    ```
+    Run `npm run generate:tests -- --product=bop --api=createQuote`.
+    What does this output? It should look something like:
+    ```
+    Raw arguments received by script: [
+      '/path/to/node',
+      '/path/to/your/project/node_modules/.bin/ts-node', // or .../ts-node/dist/bin.js
+      '/path/to/your/project/src/core/test-generator.ts',
+      '--product=bop',  // <-- These are what yargs needs to see
+      '--api=createQuote' // <--
+    ]
+    ```
+    If `--product=bop` and `--api=createQuote` are *not* present as separate elements in this array, then npm is not forwarding them as expected, or `hideBin` is somehow misinterpreting them.
+
+3.  **Try without `hideBin` (less likely to be the issue, but worth a quick check):**
+    ```typescript
+    const argv = yargs(process.argv.slice(2)) // Slice off node and script path manually
+      // ... rest of yargs config
+      .argv;
+    ```
+    `hideBin` is just a utility for `process.argv.slice(2)`.
+
+4.  **Double-check typos:** Ensure the arguments you're passing on the command line exactly match what `yargs` expects (`--product`, not `--prod` or similar, unless you defined aliases).
+
+Let's try these and see if we can pinpoint where the argument parsing is going astray. The `console.log(process.argv)` will be very revealing.
