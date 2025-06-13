@@ -225,3 +225,73 @@ generateTests().catch(error => {
     ```
 
 Now, when you run `npm run generate:tests -- --product=bop --api=createQuote`, it should correctly generate the combinations and the associated files without the previous errors related to the `cartesian` product.
+
+
+
+You are absolutely right! My apologies. The `yargs` setup in the `test-generator.ts` was indeed missing the part that tells it how to parse arguments when run via `npm run ...` scripts.
+
+When you use `npm run generate:tests -- --product=bop --api=createQuote`, the `--` correctly passes the subsequent arguments to the script. However, `yargs` by default might not process them as expected in this context without a bit more configuration.
+
+Let's fix the `yargs` parsing in `test-generator.ts`.
+
+---
+
+Here's the corrected section in `test-generator.ts`:
+
+📁 **`src/core/`**
+📄 **`test-generator.ts`** (Corrected `yargs` setup)
+```typescript
+import * as fs from 'fs';
+import * as path from 'path';
+import * as yaml from 'js-yaml';
+import yargs from 'yargs/yargs'; // Changed import slightly
+import { hideBin } from 'yargs/helpers';
+
+// ... (interfaces and generateCombinations function remain the same) ...
+
+// --- Main Generator Logic ---
+async function generateTests() {
+  // 1. Parse CLI arguments
+  const argv = await yargs(hideBin(process.argv)) // Use yargs() directly
+    .options({
+      product: { type: 'string', demandOption: true, description: 'Product code (e.g., bop)' },
+      api: { type: 'string', demandOption: true, description: 'API name (e.g., createQuote)' },
+    })
+    .help() // Add help option
+    .alias('h', 'help')
+    .strict() // Enforce that only defined options are used
+    .parseAsync(); // Use parseAsync for consistency
+
+  const { product, api } = argv; // This should now work correctly
+  console.log(`Generating tests for Product: ${product}, API: ${api}`);
+
+  // ... (rest of the generateTests function remains the same) ...
+}
+
+// ... (call to generateTests() and error handling remain the same) ...
+```
+
+**Key Changes to `yargs` Setup:**
+
+1.  **`import yargs from 'yargs/yargs';`**: Changed the import slightly to `yargs/yargs`. This gives us the function to initialize `yargs` with `process.argv`.
+2.  **`yargs(hideBin(process.argv))`**: This is the standard way to initialize `yargs` to correctly parse command-line arguments, including those passed after `--` in an npm script.
+3.  **`.help()` and `.alias('h', 'help')`**: Added the standard help option.
+4.  **`.strict()`**: This is good practice. It will cause `yargs` to error if unknown options are passed.
+5.  **`.parseAsync()`**: Using `parseAsync()` to be consistent if any async validation or coercion were to be added later. For simple parsing, `.parse()` would also work.
+
+**Why the Previous Version Failed with `npm run ... -- ...`:**
+
+The previous `yargs(hideBin(process.argv))` without the direct `yargs()` import might have had a subtle issue with how `npm` forwards arguments when `yargs` is imported as `import yargs from 'yargs'`. Using `yargs/yargs` and initializing it with `hideBin(process.argv)` is the more robust way to handle CLI argument parsing in Node.js scripts, especially when they are invoked through `npm` scripts.
+
+**To Test This Correction:**
+
+1.  Replace the `yargs` import and initialization in your `src/core/test-generator.ts` with the snippet above.
+2.  Save the file.
+3.  Run the command again:
+    ```bash
+    npm run generate:tests -- --product=bop --api=createQuote
+    ```
+
+This should now correctly parse `product` as "bop" and `api` as "createQuote", and the script should proceed without the "Missing required arguments" error.
+
+Let me know if this resolves the issue!
