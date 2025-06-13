@@ -428,3 +428,125 @@ async function generateTests() {
 4.  **Double-check typos:** Ensure the arguments you're passing on the command line exactly match what `yargs` expects (`--product`, not `--prod` or similar, unless you defined aliases).
 
 Let's try these and see if we can pinpoint where the argument parsing is going astray. The `console.log(process.argv)` will be very revealing.
+
+
+Ah, PowerShell! That's a very important piece of information. PowerShell handles arguments, especially those after `--`, differently from `bash` or `cmd`. This is a common source of confusion for Node.js CLI tools.
+
+**The PowerShell Problem with `--` (The "Stop Parsing" Token)**
+
+In PowerShell, the `--` token tells PowerShell to stop parsing arguments itself and pass the rest of the line verbatim *as a single string* to the executable if the executable is a native Windows application. For Node.js scripts (which are not native executables directly), the behavior can be a bit more nuanced and sometimes requires specific quoting or handling by the argument parsing library within Node.js.
+
+Often, `npm` tries to normalize this, but it's not always perfect.
+
+**Let's Try Solutions Tailored for PowerShell:**
+
+**Solution 1: Remove the `--` in your `npm run` command (Most Likely Fix)**
+
+When running `npm` scripts in PowerShell, often you *don't* need the `--` to pass arguments to the underlying script. `npm` itself usually handles forwarding them.
+
+Try this in PowerShell:
+```powershell
+npm run generate:tests --product=bop --api=createQuote
+```
+**Notice the removal of the standalone `--` before `--product=bop`.**
+
+Then, in your `test-generator.ts`, the `yargs` setup from my previous "Corrected Version" (the one with `yargs(hideBin(process.argv))` and `.option()`) should work.
+
+**Let's re-paste that yargs setup for clarity:**
+
+```typescript
+// In src/core/test-generator.ts
+
+import yargs from 'yargs'; // Or yargs/yargs
+import { hideBin } from 'yargs/helpers';
+
+// ... other imports and interfaces ...
+
+async function generateTests() {
+  console.log("Raw process.argv:", process.argv); // Keep this for debugging
+
+  const argv = await yargs(hideBin(process.argv))
+    .options({
+      product: {
+        alias: 'p',
+        describe: 'Product code (e.g., bop)',
+        type: 'string',
+        demandOption: true,
+      },
+      api: {
+        alias: 'a',
+        describe: 'API name (e.g., createQuote)',
+        type: 'string',
+        demandOption: true,
+      },
+    })
+    .help()
+    .alias('help', 'h')
+    .strict()
+    .parseAsync(); // .argv would also be fine if no async middleware
+
+  const { product, api } = argv;
+
+  if (!product || !api) { // This check might be redundant if demandOption works
+    console.error("Error: Product and API arguments are required. Yargs parsing might have failed.");
+    console.error("Parsed argv:", argv);
+    process.exit(1);
+  }
+
+  console.log(`Generating tests for Product: ${product}, API: ${api}`);
+  // ... rest of your function
+}
+
+generateTests().catch(error => {
+  console.error("❌ Error during test generation:", error);
+  process.exit(1);
+});
+```
+
+**What `console.log("Raw process.argv:", process.argv);` should show (with Solution 1):**
+When you run `npm run generate:tests --product=bop --api=createQuote` in PowerShell, `process.argv` inside your script should look like:
+```
+Raw process.argv: [
+  'C:\\Program Files\\nodejs\\node.exe', // Path to Node
+  'C:\\path\\to\\your\\project\\node_modules\\ts-node\\dist\\bin.js', // Path to ts-node runner
+  'C:\\path\\to\\your\\project\\src\\core\\test-generator.ts', // Path to your script
+  '--product=bop',
+  '--api=createQuote'
+]
+```
+This is what `yargs(hideBin(process.argv))` is designed to parse correctly.
+
+**Solution 2: If Solution 1 doesn't work, try quoting the arguments (Less Common for npm)**
+
+Sometimes, PowerShell might still interfere. You could try quoting the arguments passed to npm, though this is less common for `npm run` scripts.
+```powershell
+npm run generate:tests "--product=bop" "--api=createQuote"
+```
+Or even:
+```powershell
+npm run generate:tests -- "--product=bop" "--api=createQuote"
+```
+(Keeping the `--` but quoting the arguments after it).
+
+**Solution 3: Modifying the npm script to explicitly handle arguments (More Complex)**
+
+If neither of the above works, you can modify the `package.json` script to explicitly take arguments, though this makes the script less flexible.
+```json
+// In package.json
+"scripts": {
+  "generate:tests": "ts-node src/core/test-generator.ts"
+  // If you wanted to pass them as script args to npm itself, it's more complex
+  // and usually not necessary.
+},
+```
+Then call it like this and have `yargs` parse `$1`, `$2`, etc. if you were directly invoking the script without `npm run`. But with `npm run`, the arguments are usually just appended.
+
+**Let's start with Solution 1 as it's the most common fix for PowerShell + npm + argument parsing issues.**
+
+1.  Ensure your `test-generator.ts` has the `yargs` setup as shown above (with the `console.log(process.argv)` for debugging).
+2.  In PowerShell, run:
+    ```powershell
+    npm run generate:tests --product=bop --api=createQuote
+    ```
+
+Check the output of `console.log("Raw process.argv:", process.argv);`. If it shows `--product=bop` and `--api=createQuote` as separate array elements, `yargs` should work. If it's still failing, share that `process.argv` output.
