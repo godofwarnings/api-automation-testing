@@ -1,0 +1,16 @@
+{
+  "QuoteRequest": {
+    "Product": "BOP",
+    "State": "{{StateCode}}",
+    "BusinessInfo": {
+      "Industry": "Retail",
+      "YearsInBusiness": 5
+    },
+    "Coverages": {
+      "GeneralLiability": {
+        "Limit": "{{CoverageAmount}}"
+      }
+    },
+    "IsNewCustomer": "{{IsNewCustomer}}"
+  }
+}

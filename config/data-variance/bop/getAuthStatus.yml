@@ -1,0 +1,11 @@
+parameters: [] # No data variations needed
+
+endpoint_template: "/bearer"
+method: GET
+
+expected_response:
+  success:
+    status: 200
+    body:
+      authenticated: true
+      token: "dummy-token" # We will verify the key exists, not the value

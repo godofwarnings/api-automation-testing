@@ -1,0 +1,8 @@
+{
+  "name": "{{petName}}",
+  "status": "{{petStatus}}",
+  "metadata": {
+    "generatedBy": "PlaywrightFramework",
+    "isRealPet": false
+  }
+}

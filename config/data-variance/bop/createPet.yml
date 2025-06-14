@@ -1,0 +1,20 @@
+# Data variations for the createPet API test
+parameters:
+  - field: petName
+    values: ["Fido", "Lucy"]
+  - field: petStatus
+    values: ["available"]
+
+# The endpoint on httpbin that echoes our POST request
+endpoint_template: "/post"
+method: POST
+
+# The expected response from httpbin.org/post
+# It echoes the JSON payload we send under a "json" key.
+expected_response:
+  success:
+    status: 200
+    body:
+      # We can check that the echoed 'json' object has our pet's name
+      json:
+        should_contain_key: "name"

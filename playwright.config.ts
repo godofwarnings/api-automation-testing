@@ -1,13 +1,10 @@
 import { defineConfig } from '@playwright/test';
-import * as path from 'path';
+import { AUTH_FILE } from './tests/auth.setup';
 
 export default defineConfig({
-    testDir: './tests/products', // Point to the new product-specific test folder
+    testDir: './tests', // Point to the root tests directory
 
-    // Point to the global setup file
-    globalSetup: require.resolve('./tests/globalSetup.ts'),
-
-    fullyParallel: true,
+    // Fail the build on CI if you accidentally left test.only in the source code.
     forbidOnly: !!process.env.CI,
     retries: process.env.CI ? 2 : 0,
     workers: process.env.CI ? 1 : undefined,
@@ -17,21 +14,33 @@ export default defineConfig({
         ['allure-playwright', { outputFolder: 'allure-results' }]
     ],
 
+    // Shared settings for all projects.
     use: {
-        // BASE_URL will be set dynamically by globalSetup
-        baseURL: process.env.BASE_URL,
+        // The baseURL will be set dynamically by the auth.setup.ts test
+        // and read via process.env.PLAYWRIGHT_BASE_URL in the fixture.
         ignoreHTTPSErrors: true,
         trace: 'on-first-retry',
     },
 
     projects: [
+        // --- Authentication Projects ---
         {
-            name: 'bop',
-            testMatch: /bop\/specs\/.*\.spec\.ts/,
+            name: 'BOP Authentication',
+            testMatch: '**/products/bop/bop.auth.setup.ts',
+            // testMatch: /products\/bop\/bop\.auth\.setup\.ts/ 
+        },
+        { name: 'GL Authentication', testMatch: /products\/gl\/gl\.auth\.setup\.ts/ },
+
+        // --- API Test Projects ---
+        {
+            name: 'bop-api-tests',
+            testMatch: /products\/bop\/specs\/.*\.spec\.ts/,
+            dependencies: ['BOP Authentication'], // <-- BOP tests depend on BOP auth
         },
         {
-            name: 'gl', // Future project
-            testMatch: /gl\/specs\/.*\.spec\.ts/,
+            name: 'gl-api-tests',
+            testMatch: /products\/gl\/specs\/.*\.spec\.ts/,
+            dependencies: ['GL Authentication'], // <-- GL tests depend on GL auth
         },
     ],
 });

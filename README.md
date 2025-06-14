@@ -59,8 +59,15 @@ npm install --save-dev @playwright/test typescript @types/node @types/js-yaml js
 npx playwright install --with-deps
 ```
 
+* For Linux (Arch Linux):
+
+```bash
+yay -S playwright
+```
+
 * **Install allure commandline version**
-  * For Linux:
+
+  * For Linux (Debian/Ubuntu):
   
   ```bash
   sudo apt-get install allure
@@ -76,10 +83,25 @@ npx playwright install --with-deps
 
 * **Generate Tests**
 
+(works in linux)
 ```bash
 npm run generate:tests -- --product=bop --api=createQuote
 ```
 
+(works in windows)
+```bash
+npm run generate:tests -- -- --product=bop --api=createQuote
+```
+
+The issue is that for some reason in windows, the first `--` is taken for the default arguements of npm run, so we need to add an extra `--` before the arguments.
+
+e.g.
+
+```bash
+npm run generate:tests -- --verbose -- --product=bop --api=createQuote
+```
+
+(runs in both linux and windows)
 
 ```bash
 npx ts-node src/core/test-generator.ts --product=bop --api=createQuote

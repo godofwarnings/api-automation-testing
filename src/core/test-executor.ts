@@ -1,240 +1,142 @@
-import { test, expect, APIRequestContext, APIResponse } from '@playwright/test';
+// Use our custom test fixture that provides an authenticated context
+import { test, expect } from '@/helpers/test-fixtures';
+import { APIRequestContext, APIResponse } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { allure } from 'allure-playwright';
-import { getAuthHeaders, setGlobalVariable, getGlobalVariable } from '@/helpers/auth-handler'; // Updated auth-handler
+
+// --- Type Definitions ---
 
 interface TestCase {
     test_id: string;
     description: string;
     endpoint: string;
-    method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'; // Added PATCH
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
     headers?: { [key: string]: string };
-    payload?: any; // Can be inline string/object, or file path string
-    auth: 'none' | 'bearer' | 'cookie'; // Assuming bearer for API key based auth
-    chaining?: {
-        set_global?: { [key: string]: string }; // Store response values globally
-        use_global?: { [key: string]: string }; // Use global values in request (e.g., in endpoint or payload)
-    };
-    pre_hooks?: string[]; // (Future) Scripts to run before the test
-    post_hooks?: string[];// (Future) Scripts to run after the test
+    payload?: any;
+    auth: 'none' | 'bearer'; // 'bearer' will use the authenticated fixture
 }
 
 interface ExpectedOutput {
     status: number;
-    body?: {
-        should_contain_key?: string; // Simple check for key existence
-        [key: string]: any; // For deeper object matching
-    };
-    headers?: { [key: string]: string | RegExp }; // Allow regex for header values
-    // Add more assertion types as needed: regex_match_body, schema_validation, etc.
+    body?: null | { should_contain_key?: string;[key: string]: any } | string;
+    headers?: { [key: string]: string | RegExp };
 }
 
-/**
- * Executes API tests based on a YAML definition file and its corresponding expected output file.
- * @param definitionYamlPath - The relative path to the YAML test definition file.
- * @param expectedJsonPath - The relative path to the JSON file with expected outputs.
- */
+// --- Main Executor Function ---
+
 export function executeApiTests(definitionYamlPath: string, expectedJsonPath: string) {
-    const definitionFilePath = path.join(process.cwd(), definitionYamlPath);
-    const expectedOutputFilePath = path.join(process.cwd(), expectedJsonPath);
-
-    if (!fs.existsSync(definitionFilePath)) {
-        console.warn(`Skipping tests: Definition file not found at ${definitionFilePath}`);
-        return;
+    // 1. Prerequisite Checks (run before any tests are defined)
+    if (!fs.existsSync(definitionYamlPath)) {
+        throw new Error(`FATAL: Definition file not found: ${definitionYamlPath}`);
     }
-    if (!fs.existsSync(expectedOutputFilePath)) {
-        console.warn(`Skipping tests: Expected output file not found at ${expectedOutputFilePath}`);
-        return;
+    if (!fs.existsSync(expectedJsonPath)) {
+        throw new Error(`FATAL: Expected output file not found: ${expectedJsonPath}`);
     }
 
-    const testCases = yaml.load(fs.readFileSync(definitionFilePath, 'utf8')) as TestCase[];
-    const allExpectedOutputs = JSON.parse(fs.readFileSync(expectedOutputFilePath, 'utf8'));
+    let testCases: TestCase[];
+    let allExpectedOutputs: Record<string, ExpectedOutput>;
 
+    try {
+        testCases = yaml.load(fs.readFileSync(definitionYamlPath, 'utf8')) as TestCase[];
+        if (!Array.isArray(testCases)) {
+            throw new Error(`YAML file ${definitionYamlPath} must parse to an array.`);
+        }
+    } catch (e: any) {
+        throw new Error(`FATAL: Error parsing YAML file ${definitionYamlPath}: ${e.message}`);
+    }
+
+    try {
+        allExpectedOutputs = JSON.parse(fs.readFileSync(expectedJsonPath, 'utf8'));
+    } catch (e: any) {
+        throw new Error(`FATAL: Error parsing JSON file ${expectedJsonPath}: ${e.message}`);
+    }
+
+    // 2. Define the Test Suite
     test.describe(`API Tests for ${path.basename(definitionYamlPath)}`, () => {
         test.describe.configure({ mode: 'parallel' });
 
         for (const testCase of testCases) {
-            test(testCase.description, async ({ request }) => {
-                const expected: ExpectedOutput = allExpectedOutputs[testCase.test_id];
+            if (!testCase || !testCase.test_id) {
+                // Handle malformed entries gracefully by creating a failing test
+                test(`Malformed Test Case in ${path.basename(definitionYamlPath)}`, () => {
+                    throw new Error(`Malformed test case entry found (missing test_id): ${JSON.stringify(testCase)}`);
+                });
+                continue;
+            }
+
+            // 3. Define a Test for Each Case
+            test(testCase.description || `Test ID: ${testCase.test_id}`, async ({ request, authedRequest }) => {
+                const expected = allExpectedOutputs[testCase.test_id];
                 if (!expected) {
-                    throw new Error(`No expected output found for test_id: ${testCase.test_id} in ${expectedOutputFilePath}`);
+                    throw new Error(`No expected output found for test_id: ${testCase.test_id}`);
                 }
 
+                // --- Allure Metadata ---
                 await allure.id(testCase.test_id);
-                await allure.epic(path.dirname(definitionYamlPath).split(path.sep).pop() || 'API Tests'); // e.g., 'bop'
-                await allure.feature(path.basename(definitionYamlPath, '.yml')); // e.g., 'createQuote'
+                await allure.epic(path.dirname(definitionYamlPath).split(path.sep).pop() || 'API Tests');
+                await allure.feature(path.basename(definitionYamlPath, '.yml'));
                 await allure.story(testCase.description);
 
-                await allure.step(`[Setup] Test ID: ${testCase.test_id}`, async () => {
-                    allure.parameter('Method', testCase.method);
-                    allure.parameter('Endpoint', testCase.endpoint);
-                    allure.parameter('Auth Type', testCase.auth);
-                });
-
-                // --- Request Preparation ---
-                let finalEndpoint = testCase.endpoint;
-                let finalPayload = testCase.payload;
-
-                // Apply global variables to endpoint and payload if specified
-                if (testCase.chaining?.use_global) {
-                    for (const [placeholder, globalVarKey] of Object.entries(testCase.chaining.use_global)) {
-                        const value = getGlobalVariable(globalVarKey);
-                        if (value === undefined) {
-                            console.warn(`Global variable '${globalVarKey}' not found for placeholder '${placeholder}' in test ${testCase.test_id}`);
-                            continue;
-                        }
-                        const regex = new RegExp(`\\{\\{${placeholder}\\}\\}`, 'g');
-                        finalEndpoint = finalEndpoint.replace(regex, String(value));
-                        // Deep replace in payload (if payload is an object or stringified object)
-                        if (typeof finalPayload === 'string') {
-                            finalPayload = finalPayload.replace(regex, String(value));
-                        } else if (typeof finalPayload === 'object' && finalPayload !== null) {
-                            finalPayload = JSON.parse(JSON.stringify(finalPayload).replace(regex, String(value)));
-                        }
-                    }
-                }
-
-                const response = await sendRequest(request, { ...testCase, endpoint: finalEndpoint, payload: finalPayload });
+                // --- Request Execution ---
+                const apiRequest = testCase.auth === 'bearer' ? authedRequest : request;
+                const response = await sendRequest(apiRequest, testCase);
 
                 // --- Assertions ---
                 await allure.step(`[Assert] Status Code - Expected: ${expected.status}`, async () => {
                     expect(response.status()).toBe(expected.status);
                 });
 
-                const responseBodyText = await response.text(); // Get text once for logging and potential parsing
-                let actualBody: any;
-                try {
-                    actualBody = responseBodyText ? JSON.parse(responseBodyText) : null; // Handle empty body
-                } catch (e) {
-                    actualBody = responseBodyText; // If not JSON, keep as text for comparison
-                }
+                const responseBodyText = await response.text();
+                const actualBody = responseBodyText ? tryParseJson(responseBodyText) : null;
 
-                if (expected.body) {
-                    await allure.step('[Assert] Response Body', async () => {
-                        if (expected.body.should_contain_key && actualBody && typeof actualBody === 'object') {
-                            expect(actualBody).toHaveProperty(expected.body.should_contain_key);
-                        } else if (actualBody !== null) { // Only match if actualBody is not null
-                            expect(actualBody).toMatchObject(expected.body);
-                        } else if (expected.body !== null) { // Fail if expected body but got null
-                            expect(actualBody).toEqual(expected.body); // This will show a clear diff
-                        }
-                        // For XML or non-JSON text bodies, you'd compare `responseBodyText`
-                    });
-                }
-
-                if (expected.headers) {
-                    await allure.step('[Assert] Response Headers', async () => {
-                        for (const [key, value] of Object.entries(expected.headers!)) {
-                            const headerValue = response.headers()[key.toLowerCase()];
-                            expect(headerValue).toBeDefined();
-                            if (value instanceof RegExp) {
-                                expect(headerValue).toMatch(value);
-                            } else {
-                                expect(headerValue).toContain(value); // Use toContain for partial matches if needed
-                            }
-                        }
-                    });
-                }
-
-                // --- Post-Request Chaining ---
-                if (response.ok() && testCase.chaining?.set_global) {
-                    await handleResponseChaining(actualBody, testCase.chaining.set_global);
-                }
+                await assertBody(actualBody, expected.body);
+                await assertHeaders(response.headers(), expected.headers);
             });
         }
     });
 }
 
+// --- Helper Functions ---
+
 /**
- * A helper function to send an API request based on the test case definition.
+ * Prepares and sends the API request based on the test case definition.
  */
 async function sendRequest(request: APIRequestContext, testCase: TestCase): Promise<APIResponse> {
+    const requestHeaders = { ...(testCase.headers || {}) };
     let payloadData: any = testCase.payload;
-    const requestHeaders = { ...(testCase.headers || {}) }; // Start with defined headers
-    let payloadContentType = requestHeaders['Content-Type'] || requestHeaders['content-type'] || 'application/json';
 
-    if (testCase.auth === 'bearer' || testCase.auth === 'cookie') {
-        Object.assign(requestHeaders, getAuthHeaders()); // Add auth headers
-    }
-
-    // Check if payload is a file path
-    if (typeof testCase.payload === 'string' && testCase.payload.startsWith('file://')) {
-        const filePath = path.join(process.cwd(), testCase.payload.replace('file://', ''));
-        if (!fs.existsSync(filePath)) {
-            throw new Error(`Payload file not found: ${filePath}`);
-        }
+    if (typeof payloadData === 'string' && payloadData.startsWith('file://')) {
+        const filePath = path.join(process.cwd(), payloadData.replace('file://', ''));
+        if (!fs.existsSync(filePath)) throw new Error(`Payload file not found: ${filePath}`);
         payloadData = fs.readFileSync(filePath, 'utf-8');
-        // Content-Type might be in headers already, or infer from file extension if needed.
-        // For now, we rely on the `Content-Type` header specified in the YAML.
-        await allure.attachment('Request Payload (from file)', payloadData, {
-            contentType: payloadContentType
-        });
-    } else if (payloadData && typeof payloadData === 'object') {
-        // If payload is an object, assume JSON if Content-Type is not explicitly XML
-        if (payloadContentType.toLowerCase().includes('xml')) {
-            // Here you might need an XML builder if your object needs to be converted to XML string
-            // For now, assuming if it's an object and Content-Type is XML, it's a pre-formatted string.
-            // If it's truly an object needing XML serialization, you'd use a library like 'xml-js' or 'js2xmlparser'.
-            // For this example, let's assume it's passed as a string if it's XML from an object.
-            // payloadData = convertObjectToXml(payloadData); // Placeholder for actual conversion
-        } else { // Default to JSON
-            payloadData = JSON.stringify(payloadData);
-            if (!payloadContentType.toLowerCase().includes('json')) {
-                payloadContentType = 'application/json'; // Ensure content type is json
-                requestHeaders['Content-Type'] = 'application/json';
+    }
+
+    const contentType = requestHeaders['Content-Type'] || requestHeaders['content-type'];
+    const options: { headers: any; jsonData?: any; data?: any } = { headers: requestHeaders };
+
+    if (payloadData !== undefined && payloadData !== null) {
+        await allure.step(`[Prepare] Processing Payload`, async () => {
+            if (contentType && contentType.toLowerCase().includes('json')) {
+                options.jsonData = (typeof payloadData === 'string') ? JSON.parse(payloadData) : payloadData;
+                await allure.attachment('Request Payload (JSON)', JSON.stringify(options.jsonData, null, 2), { contentType: 'application/json' });
+            } else {
+                options.data = String(payloadData);
+                await allure.attachment('Request Payload (Text/XML)', options.data, { contentType: contentType || 'text/plain' });
             }
-        }
-        await allure.attachment('Request Payload (inline)', payloadData, { contentType: payloadContentType });
-    } else if (typeof payloadData === 'string' && (payloadContentType.toLowerCase().includes('json'))) {
-        // If payload is a string and looks like JSON, try to parse it to ensure it's valid for Playwright's `data`
-        try {
-            payloadData = JSON.parse(payloadData); // Playwright's `data` expects an object for JSON
-        } catch (e) {
-            // Not a valid JSON string, send as is (Playwright might handle it as form data or text)
-        }
-        await allure.attachment('Request Payload (inline string)', String(testCase.payload), { contentType: payloadContentType });
-    } else if (payloadData) { // For other string payloads (e.g. plain text, form-urlencoded)
-        await allure.attachment('Request Payload (inline string)', String(payloadData), { contentType: payloadContentType });
+        });
     }
-
-
-    const options: any = {
-        headers: requestHeaders,
-        data: payloadData, // Playwright's `data` can be string (for XML, form-data) or object (for JSON)
-    };
-
-    if (payloadContentType.toLowerCase().includes('xml') && typeof payloadData === 'string') {
-        options.data = payloadData; // Send XML as raw string
-    } else if (payloadContentType.toLowerCase().includes('json') && typeof payloadData === 'object') {
-        options.data = payloadData; // Send JSON as object
-    }
-    // Add other content types if needed
 
     await allure.step(`[Action] Sending ${testCase.method} request to ${testCase.endpoint}`, async () => {
-        if (options.data) {
-            const dataToLog = (typeof options.data === 'object') ? JSON.stringify(options.data, null, 2) : options.data;
-            await allure.attachment('Request Data Sent', dataToLog, { contentType: payloadContentType });
-        }
-        await allure.attachment('Request Headers Sent', JSON.stringify(options.headers, null, 2), { contentType: 'application/json' });
+        await allure.attachment('Request Headers', JSON.stringify(options.headers, null, 2), { contentType: 'application/json' });
     });
 
-    const response = await request[testCase.method.toLowerCase() as 'get' | 'post' | 'put' | 'delete' | 'patch'](
-        testCase.endpoint,
-        options
-    );
+    const response = await request[testCase.method.toLowerCase() as 'post'](testCase.endpoint, options);
 
-    await allure.step(`[Result] Received response (Status: ${response.status()})`, async () => {
-        const bodyText = await response.text();
-        let contentType = response.headers()['content-type'] || 'text/plain';
-        // Ensure attachment type is one Allure supports, or default to text/plain
-        if (contentType.includes('json')) contentType = 'application/json';
-        else if (contentType.includes('xml')) contentType = 'application/xml';
-        else if (contentType.includes('html')) contentType = 'text/html';
-        else contentType = 'text/plain';
-
-        await allure.attachment('Response Body', bodyText, { contentType });
+    await allure.step(`[Result] Received Response (Status: ${response.status()})`, async () => {
+        const contentType = response.headers()['content-type'] || 'text/plain';
+        await allure.attachment('Response Body', await response.text(), { contentType });
         await allure.attachment('Response Headers', JSON.stringify(response.headers(), null, 2), { contentType: 'application/json' });
     });
 
@@ -242,31 +144,55 @@ async function sendRequest(request: APIRequestContext, testCase: TestCase): Prom
 }
 
 /**
- * Handles post-response actions, like extracting and storing global variables.
+ * Tries to parse a string as JSON, returning the raw string if it fails.
  */
-async function handleResponseChaining(responseBody: any, setGlobalConfig: { [key: string]: string }) {
-    if (!responseBody || typeof responseBody !== 'object') {
-        console.warn('[Chaining] Cannot process chaining: Response body is not a parsable object.');
-        return;
+function tryParseJson(text: string): any {
+    try {
+        return JSON.parse(text);
+    } catch {
+        return text;
     }
-    await allure.step('[Chaining] Processing response data for global variables', async () => {
-        for (const [globalVarKey, sourcePath] of Object.entries(setGlobalConfig)) {
-            const value = getValueFromObject(responseBody, sourcePath);
-            if (value !== undefined && value !== null) {
-                setGlobalVariable(globalVarKey, value);
-                await allure.attachment(`${globalVarKey} Captured`, String(value), { contentType: 'text/plain' });
+}
+
+/**
+ * Contains the logic for asserting the response body.
+ */
+async function assertBody(actualBody: any, expectedBody: ExpectedOutput['body']) {
+    if (expectedBody === undefined) return; // No body assertions needed
+
+    await allure.step('[Assert] Response Body', async () => {
+        if (expectedBody === null) {
+            expect(actualBody, "Expected response body to be null or empty.").toBeNull();
+        } else if (typeof expectedBody === 'string') {
+            expect(actualBody, "Expected an exact string match.").toBe(expectedBody);
+        } else if (typeof actualBody === 'object' && actualBody !== null) {
+            if (expectedBody.should_contain_key) {
+                expect(actualBody, `Expected key not found: ${expectedBody.should_contain_key}`).toHaveProperty(expectedBody.should_contain_key);
             } else {
-                console.warn(`[Chaining] Value for path '${sourcePath}' not found in response for global variable '${globalVarKey}'.`);
+                expect(actualBody, "Expected JSON body to match structure.").toMatchObject(expectedBody);
             }
+        } else {
+            // Fail if we expected an object but didn't get a parsable object
+            throw new Error(`Type mismatch: Expected body to be an object, but received type '${typeof actualBody}'. Actual Body: ${actualBody}`);
         }
     });
 }
 
 /**
- * Utility to extract a value from an object using a dot-notation string path.
- * e.g., getValueFromObject({ a: { b: 5 } }, 'a.b') returns 5
+ * Contains the logic for asserting response headers.
  */
-function getValueFromObject(obj: any, path: string): any {
-    if (typeof path !== 'string') return undefined;
-    return path.split('.').reduce((o, key) => (o && typeof o === 'object' && o[key] !== undefined ? o[key] : undefined), obj);
+async function assertHeaders(actualHeaders: Record<string, string>, expectedHeaders?: ExpectedOutput['headers']) {
+    if (!expectedHeaders) return; // No header assertions needed
+
+    await allure.step('[Assert] Response Headers', async () => {
+        for (const [key, expectedValue] of Object.entries(expectedHeaders)) {
+            const actualValue = actualHeaders[key.toLowerCase()];
+            expect(actualValue, `Header '${key}' not found.`).toBeDefined();
+            if (typeof expectedValue === 'string') {
+                expect(actualValue, `Header '${key}' did not match.`).toContain(expectedValue);
+            } else { // It's a RegExp
+                expect(actualValue, `Header '${key}' did not match regex.`).toMatch(expectedValue);
+            }
+        }
+    });
 }

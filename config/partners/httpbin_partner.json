@@ -1,0 +1,16 @@
+{
+  "partnerName": "HTTPBin Test Partner",
+  "environments": {
+    "test": {
+      "host": "https://httpbin.org"
+    }
+  },
+  "products": {
+    "bop": {
+      "auth_path": "/post",
+      "app_id_var": "HTTPBIN_APP_ID",
+      "app_key_var": "HTTPBIN_APP_KEY",
+      "resource_key_var": "HTTPBIN_RESOURCE_KEY"
+    }
+  }
+}

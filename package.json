@@ -4,10 +4,16 @@
   "description": "A modular enterprise-grade API test automation framework",
   "main": "dist/index.js",
   "scripts": {
-    "test": "cross-env-shell \"playwright test --project=bop\"",
-    "test:sit:partner_a": "npm run test -- --env=sit --partner=partner_a",
-    "test:uat:partner_a": "npm run test -- --env=uat --partner=partner_a",
     "generate:tests": "ts-node src/core/test-generator.ts",
+
+    "test:bop:httpbin": "cross-env ENV=test PARTNER=httpbin_partner playwright test --project=bop-api-tests",
+    "test:bop:sit:partner_a": "cross-env ENV=sit PARTNER=partner_a playwright test --project=bop-api-tests",
+
+    "test:gl:sit:partner_a": "cross-env ENV=sit PARTNER=partner_a playwright test --project=gl-api-tests",
+    
+    "auth:bop:httpbin": "cross-env ENV=test PARTNER=httpbin_partner playwright test --project='BOP Authentication'",
+    "auth:bop:sit:partner_a": "cross-env ENV=sit PARTNER=partner_a playwright test --project='BOP Authentication'",
+
     "report:allure": "allure generate allure-results --clean -o allure-report && allure open"
   },
   "keywords": [
@@ -19,28 +25,20 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@playwright/test": "^1.45.0",
+    "@playwright/test": "^1.53.0",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^20.10.4",
-    "@types/yargs": "^17.0.32",
+    "@types/node": "^20.19.0",
+    "@types/yargs": "^17.0.33",
     "allure-playwright": "^2.15.1",
     "cross-env": "^7.0.3",
-    "dotenv": "^16.3.1",
+    "dotenv": "^16.5.0",
     "js-yaml": "^4.1.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.3",
+    "typescript": "^5.8.3",
     "yargs": "^17.7.2"
   },
   "directories": {
     "test": "tests"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/godofwarnings/api-automation-testing.git"
-  },
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/godofwarnings/api-automation-testing/issues"
-  },
-  "homepage": "https://github.com/godofwarnings/api-automation-testing#readme"
+  "type": "commonjs"
 }
