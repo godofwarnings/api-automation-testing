@@ -128,3 +128,82 @@ If you are on a restricted network and need to install some pip packages, say `r
 ```powershell
 pip install --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org ruamel.yaml
 ```
+
+---
+
+#### **1. Test Generation**
+
+These commands create the test case `.yml` and `.json` files from your base templates.
+
+*   **Generate tests for the `createPet` API in the `bop` product:**
+    ```bash
+    # For PowerShell:
+    npm run generate:tests -- "" -- "--product=bop" "--api=createPet"
+
+    # For bash/cmd:
+    npm run generate:tests -- --product=bop --api=createPet
+    ```
+
+*   **Generate tests for the `getAuthStatus` API in the `bop` product:**
+    ```bash
+    # For PowerShell:
+    npm run generate:tests -- "" -- "--product=bop" "--api=getAuthStatus"
+
+    # For bash/cmd:
+    npm run generate:tests -- --product=bop --api=getAuthStatus
+    ```
+
+---
+
+#### **2. Running Authentication Only (for Debugging)**
+
+These commands run *only* the authentication setup for a specific product and partner, saving the resulting token in `.auth/`. This is useful for verifying that the login process works before running a full test suite.
+
+*   **Authenticate the `bop` product using the `httpbin_partner` test configuration:**
+    ```bash
+    npm run auth:bop:httpbin
+    ```
+    *   **Verifies:** Your `.env` secrets, `httpbin_partner.json` config, and the logic in `bop.auth.setup.ts`.
+    *   **Result:** Creates/updates the `.auth/bop.state.json` file.
+
+*   **Authenticate the `bop` product using a hypothetical `partner_a` SIT configuration:**
+    ```bash
+    npm run auth:bop:sit:partner_a
+    ```
+    *   **Verifies:** Your configuration for a real partner (`partner_a.json`) and the associated secrets in `.env`.
+    *   **Result:** Creates/updates the `.auth/bop.state.json` file with a real token.
+
+---
+
+#### **3. Running Full End-to-End API Test Suites**
+
+These commands run the complete test flow: they first trigger the necessary authentication setup and then execute all API tests for the specified product.
+
+*   **Run all `bop` product tests using the `httpbin_partner` test configuration:**
+    ```bash
+    npm run test:bop:httpbin
+    ```
+    *   **Executes:** `auth:bop:httpbin` first (due to dependency), then all `*.spec.ts` files for the `bop-api-tests` project.
+
+*   **Run all `bop` product tests against the `SIT` environment for `partner_a`:**
+    ```bash
+    npm run test:bop:sit:partner_a
+    ```    *   **Executes:** `auth:bop:sit:partner_a` first, then the `bop` product tests.
+
+*   **Run all `gl` product tests against the `SIT` environment for `partner_a` (Example):**
+    ```bash
+    npm run test:gl:sit:partner_a
+    ```
+    *   **Executes:** The `gl.auth.setup.ts` first, then the `gl` product tests.
+
+---
+
+#### **4. Viewing Test Reports**
+
+This command generates and opens the interactive Allure HTML report from the results of your last test run.
+
+*   **Generate and open the Allure report:**
+    ```bash
+    npm run report:allure
+    ```
+    *   **Prerequisite:** You must have run a test suite (e.g., `npm run test:bop:httpbin`) at least once to generate the `allure-results` directory.
