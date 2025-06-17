@@ -140,3 +140,132 @@ function getValueFromObject(obj: any, path: string): any {
 *   **Handles Chaining:** Because it can continue resolving a path *after* the query, you can do things like `...insurers[type=primary].contact.email`.
 
 This enhancement makes your framework's chaining capabilities truly advanced and suitable for complex, real-world API testing scenarios.
+
+
+
+That is an absolutely brilliant question. You have pinpointed a critical ambiguity in the design that needs to be resolved to make the framework clear and prevent unexpected behavior.
+
+You are asking: In a `save_from_response` block, when a user writes a path like `"insurers[type=primary].id"`, how does the code know whether to look in the **current step's response body** or in the **history of previous steps (`stepHistory`)**?
+
+The current implementation is ambiguous and could lead to errors.
+
+### The Solution: A Clear and Explicit Rule
+
+The rule should be: **The `save_from_response` block ONLY ever looks in the response body of the CURRENT step.**
+
+This makes the block's name literal and its behavior predictable. If a user wants to save a variable from a previous step's request or response, they should have already saved it to the `flow` context in that previous step.
+
+To enforce this, we need to modify the `processSaveFromResponse` function to no longer look at the "master context" (`{ flow, steps }`). Instead, it should only look at the `responseBody` object that it is given.
+
+---
+
+### The Code: Updating `test-executor.ts`
+
+Here are the corrected functions. The key change is simplifying `processSaveFromResponse` to remove its access to the `stepHistory`.
+
+📁 **`src/core/test-executor.ts`** (Updated `executeApiFlows` and `processSaveFromResponse`)
+```typescript
+// ... (All other code remains the same) ...
+
+// --- Main Executor for Flows (Slight modification to the call) ---
+export function executeApiFlows(flowYamlPath: string) {
+  // ... (setup logic: loading file, test.describe.serial, etc.) ...
+  
+  // Inside the `for (const step of flow.steps)` loop:
+  test(step.description, async ({ request, authedRequest }) => {
+    // ... (logic to resolve placeholders and send request) ...
+    const response = await sendRequest(apiRequest, resolvedStep);
+    const responseBody = response.ok() ? await tryParseJson(await response.text()) : null;
+    
+    // ... (saving to stepHistory) ...
+
+    // --- The key change is in the call to this function ---
+    // Conditionally save values from the response to the flow context
+    if (response.ok() && step.save_from_response) {
+        // We ONLY pass the current response body. We DO NOT pass stepHistory.
+        processSaveFromResponse(responseBody, step.save_from_response, flowContext);
+    }
+
+    // ... (assertion logic) ...
+  });
+}
+
+
+/**
+ * Extracts values from a response body and saves them to the flow context.
+ * This function is now simplified and only operates on the provided response body.
+ */
+function processSaveFromResponse(
+  responseBody: any,
+  rules: Record<string, string>,
+  flowContext: Record<string, any> // The context to save TO
+) {
+  if (!responseBody) {
+    console.warn(`[Chaining] Cannot save from response because the response body is empty or invalid.`);
+    return;
+  }
+  
+  allure.step('[Chaining] Saving variables from current step response', async () => {
+    for (const [variableName, jsonPath] of Object.entries(rules)) {
+      // It calls getValueFromObject ONLY on the current responseBody.
+      const value = getValueFromObject(responseBody, jsonPath);
+      
+      if (value !== undefined) {
+        flowContext[variableName] = value;
+        await allure.attachment(`${variableName} Saved`, String(value), { contentType: 'text/plain' });
+        console.log(`[Chaining] Saved '${variableName}' from current response.`);
+      } else {
+        const availableKeys = (typeof responseBody === 'object' && responseBody !== null) ? Object.keys(responseBody).join(', ') : 'Not an object';
+        const warningMessage = `[Chaining] Could not find path '${jsonPath}' in the current response body to save as '${variableName}'.`;
+        const debugMessage = `Available top-level keys in the response are: [${availableKeys}].`;
+        
+        console.warn(warningMessage);
+        console.warn(debugMessage);
+        
+        await allure.attachment(
+          `DEBUG - Failed to find path '${jsonPath}'`,
+          JSON.stringify({ warning: warningMessage, debugHint: debugMessage, responseBody }, null, 2),
+          { contentType: 'application/json' }
+        );
+      }
+    }
+  });
+}
+
+// The getValueFromObject function with array querying support remains unchanged.
+// It is a pure utility function and works correctly on any object it's given.
+function getValueFromObject(obj: any, path: string): any {
+  // ... (The powerful version from the previous step) ...
+}
+
+```
+
+### How We Distinguish Now (The "Before" and "After")
+
+Let's clarify the two different contexts where placeholders are resolved:
+
+**1. Resolving Placeholders in a Step's `endpoint`, `headers`, or `payload` (The "Input" Side)**
+
+*   **When does it happen?** *Before* the API request is sent for the current step.
+*   **What does it look for?** It looks in the **master context** (`{ flow, steps }`).
+*   **Why?** Because you need to build the *input* for the current request using data from *any* previous step's request or response.
+*   **Function responsible:** `resolveStepPlaceholders`.
+*   **Example YAML:** `endpoint: "/quotes/{{flow.createdQuoteId}}"`
+
+**2. Resolving Paths in a Step's `save_from_response` block (The "Output" Side)**
+
+*   **When does it happen?** *After* the API request for the current step has completed successfully.
+*   **What does it look for?** It **ONLY** looks in the **response body of the current step**. (This is our new, clear rule).
+*   **Why?** Because its job is to extract data from the *output* of the current operation to make it available for future steps.
+*   **Function responsible:** `processSaveFromResponse`.
+*   **Example YAML:** `save_from_response: { primaryInsurerId: "insurers[type=primary].id" }`
+
+### Summary of the Improvement
+
+By making `processSaveFromResponse` simpler and more focused, we have removed all ambiguity.
+
+*   The name `save_from_response` is now 100% literal.
+*   It's impossible for a user to accidentally reference a previous step's data in this block, preventing confusion.
+*   The framework's logic is cleaner and easier to reason about.
+
+This is a critical refinement that makes the flow-testing feature much more robust and user-friendly.
