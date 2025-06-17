@@ -454,3 +454,160 @@ function getValueFromObject(obj: any, path: string): any {
 5.  **Final `sendRequest`**: The `sendRequest` function receives the fully resolved, final payload object or string and sends it, just as it did before.
 
 This design is much more powerful and aligns perfectly with your requirement to use template files at any stage of an end-to-end flow.
+
+
+You have encountered a very common and important issue in API test automation. The problem is almost certainly not with the code's ability to traverse a nested path, but with **what object it's traversing.**
+
+When you make a POST request to a service like `httpbin.org/post`, the service doesn't return your payload directly. It wraps your payload inside its own response structure.
+
+Let's break this down.
+
+### The Root Cause: The Response Structure
+
+Imagine your `createQuote_base.json` looks like this:
+```json
+{
+  "customerName": "Test Customer",
+  "details": {
+    "id1": {
+      "id2": "some_value"
+    }
+  }
+}
+```
+
+When you POST this to `httpbin.org/post`, the response body from httpbin looks like this:
+```json
+{
+  "args": {},
+  "data": "...",
+  "files": {},
+  "form": {},
+  "headers": { ... },
+  "json": {  // <--- YOUR PAYLOAD IS WRAPPED INSIDE THIS 'json' KEY
+    "customerName": "Test Customer",
+    "details": {
+      "id1": {
+        "id2": "some_value"
+      }
+    }
+  },
+  "origin": "...",
+  "url": "..."
+}
+```
+
+Therefore, if your YAML `save_from_response` block looks like this:```yaml
+# This is INCORRECT
+save_from_response:
+  myId: "details.id1.id2"
+```
+The framework will look for a `details` key at the *top level* of the response, fail to find it, and report "path not found".
+
+The **correct path** must start from the top of the response body, which means it needs to include the `json` key:
+```yaml
+# This is CORRECT
+save_from_response:
+  myId: "json.details.id1.id2"
+```
+
+### The Solution: Improved Logging and Correct YAML
+
+While the core `getValueFromObject` function is likely correct, we can significantly improve the framework by adding **better debugging information** when a path is not found. This will make it immediately obvious what the problem is in the future.
+
+We will update the `processSaveFromResponse` function to log the available top-level keys from the response body whenever it fails to find a path.
+
+---
+
+Here is the updated `test-executor.ts` with enhanced debugging.
+
+📁 **`src/core/test-executor.ts`** (Updated `processSaveFromResponse` function)
+```typescript
+// ... (All other code in the file remains the same) ...
+// ... (imports, interfaces, executeApiFlows, resolveStepPlaceholders, etc.) ...
+
+/**
+ * Extracts values from a response and saves them to the flow context.
+ * THIS FUNCTION IS NOW UPDATED WITH BETTER DEBUGGING.
+ */
+function processSaveFromResponse(responseBody: any, rules: Record<string, string>, flowContext: Record<string, any>) {
+  if (!responseBody || typeof responseBody !== 'object') {
+    console.warn(`[Chaining] Cannot save from response because the response body is not a valid object.`);
+    return;
+  }
+  
+  allure.step('[Chaining] Saving variables from response', async () => {
+    for (const [variableName, jsonPath] of Object.entries(rules)) {
+      const value = getValueFromObject(responseBody, jsonPath);
+      
+      if (value !== undefined) {
+        // Successfully found the value
+        flowContext[variableName] = value;
+        await allure.attachment(`${variableName} Saved`, String(value), { contentType: 'text/plain' });
+        console.log(`[Chaining] Saved '${variableName}' with value: ${String(value)}`);
+      } else {
+        // --- NEW DEBUGGING LOGIC ---
+        // Failed to find the value, provide helpful debug info
+        const availableKeys = Object.keys(responseBody).join(', ');
+        const warningMessage = `[Chaining] Could not find path '${jsonPath}' in response body to save as '${variableName}'.`;
+        const debugMessage = `Available top-level keys in the response body are: [${availableKeys}]. Make sure your path starts with one of these.`;
+        
+        console.warn(warningMessage);
+        console.warn(debugMessage);
+        
+        // Attach the full response body to the Allure report for easy debugging
+        await allure.attachment(
+          `DEBUG - Failed to find path '${jsonPath}'`,
+          JSON.stringify({
+            warning: warningMessage,
+            debugHint: debugMessage,
+            responseBody: responseBody,
+          }, null, 2),
+          { contentType: 'application/json' }
+        );
+      }
+    }
+  });
+}
+
+/**
+ * Utility to extract a value from an object using a dot-notation string path.
+ * This function is robust and does not need to be changed.
+ */
+function getValueFromObject(obj: any, path: string): any {
+  // Ensure we are working with an actual object
+  if (typeof obj !== 'object' || obj === null) {
+    return undefined;
+  }
+  return path.split('.').reduce((o, key) => (o && o[key] !== undefined ? o[key] : undefined), obj);
+}
+
+// Ensure the rest of the test-executor.ts file (executeApiFlows, sendRequest, etc.)
+// is present. The only change needed is in processSaveFromResponse.
+```
+
+### **How to Apply the Fix in Your Test**
+
+1.  **Update `test-executor.ts`:** Replace your `processSaveFromResponse` function with the improved version above. `getValueFromObject` is also provided for completeness, but its logic is unchanged.
+2.  **Correct Your YAML File:** Look at your flow YAML file (`*.flow.yml`). Find the `save_from_response` section for the step that is failing. Modify the path to include the necessary parent key (which is most likely `json` when testing with `httpbin.org/post`).
+
+**Example Correction:**
+
+**BEFORE (Incorrect):**
+```yaml
+save_from_response:
+  myNestedId: "details.id1.id2" 
+```
+
+**AFTER (Correct, for httpbin):**
+```yaml
+save_from_response:
+  myNestedId: "json.details.id1.id2"
+```
+
+With the updated logging, if you forget to do this, your test output will now clearly tell you:
+```
+[Chaining] Could not find path 'details.id1.id2' in response body to save as 'myNestedId'.
+[Chaining] Available top-level keys in the response body are: [args, data, files, form, headers, json, origin, url]. Make sure your path starts with one of these.
+```
+This makes the problem immediately obvious and easy to solve.
