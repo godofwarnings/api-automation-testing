@@ -269,3 +269,121 @@ By making `processSaveFromResponse` simpler and more focused, we have removed al
 *   The framework's logic is cleaner and easier to reason about.
 
 This is a critical refinement that makes the flow-testing feature much more robust and user-friendly.
+
+You are asking exactly the right question, and I apologize that the previous explanation wasn't clear enough or that the code had a subtle bug preventing this.
+
+**Yes, you absolutely should be able to use the array query syntax in the `save_from_response` block.** The goal of the framework is for any placeholder resolution to work consistently, no matter where it's used.
+
+Let's clarify the mechanism and provide a new, more robust version of the `getValueFromObject` function that is guaranteed to handle this case correctly.
+
+### The Mechanism: One Function to Rule Them All
+
+The key principle is that there is only **one** function responsible for resolving these paths: `getValueFromObject`. This function is called in two places:
+1.  By `resolveStepPlaceholders` to fill in the **request** body/endpoint/headers.
+2.  By `processSaveFromResponse` to extract data from the **response** body.
+
+Since both processes use the same underlying utility, the syntax `obja.id2.insurers[type=primary].name` is valid in both contexts.
+
+If it's not working, it means the `getValueFromObject` function itself has a flaw in how it parses the path string. The previous `split('.').reduce(...)` approach was clever but brittle. Let's replace it with a more robust, iterative parser that is easier to debug and guaranteed to work.
+
+---
+
+### The Code: A New and Improved `getValueFromObject`
+
+This new version does not rely on splitting the string. Instead, it iteratively consumes segments of the path, correctly identifying simple keys and array queries. Please replace your existing `getValueFromObject` with this one.
+
+📁 **`src/core/test-executor.ts`** (The only function that needs to be replaced)
+```typescript
+/**
+ * A robust utility to extract a value from an object using a dot-notation path
+ * that supports array querying.
+ * @param obj The object to search within.
+ * @param path The path string, e.g., "obja.id2.insurers[type=primary].name".
+ */
+function getValueFromObject(obj: any, path: string): any {
+  // Regex to match either a simple key or an array query at the start of the path.
+  // Group 1: Array query -> e.g., "insurers[type=primary]"
+  // Group 2: Simple key -> e.g., "obja"
+  const segmentRegex = /^(\w+\[\w+=\w+\]|\[\w+=\w+\])|(\w+)/;
+  
+  // Regex to parse the parts of an array query.
+  // Group 1: Array key -> "insurers"
+  // Group 2: Query field -> "type"
+  // Group 3: Query value -> "primary"
+  const arrayQueryParser = /(\w+)\[(\w+)=(\w+)\]/;
+  
+  let currentContext = obj;
+  let remainingPath = path;
+
+  while (remainingPath.length > 0 && currentContext !== undefined) {
+    const match = remainingPath.match(segmentRegex);
+    if (!match) {
+      // Path format is invalid or we've reached the end
+      return undefined;
+    }
+
+    const [fullMatch, arrayQuerySegment, simpleKeySegment] = match;
+
+    if (arrayQuerySegment) {
+      // --- Handle Array Query Segment ---
+      const queryParts = arrayQuerySegment.match(arrayQueryParser);
+      if (!queryParts) return undefined; // Should not happen if first regex matched
+      
+      const [, arrayKey, queryField, queryValue] = queryParts;
+      
+      const targetArray = currentContext[arrayKey];
+      if (!Array.isArray(targetArray)) {
+        console.warn(`[getValueFromObject] Path '${arrayKey}' did not resolve to an array for query.`);
+        return undefined;
+      }
+
+      currentContext = targetArray.find(item => 
+        item && typeof item === 'object' && String(item[queryField]) === queryValue
+      );
+      
+    } else if (simpleKeySegment) {
+      // --- Handle Simple Key Segment ---
+      currentContext = currentContext[simpleKeySegment];
+    }
+    
+    // Move to the next part of the path by removing the part we just processed.
+    // Also remove the leading dot, if it exists.
+    remainingPath = remainingPath.substring(fullMatch.length).replace(/^\./, '');
+  }
+
+  return currentContext;
+}
+
+// Ensure the rest of your test-executor.ts file is present.
+// The functions that CALL getValueFromObject (like processSaveFromResponse) do not need to change.
+```
+
+### How to Apply This to Your Use Case
+
+With this new, more robust function in place, your original request will now work exactly as you intended.
+
+**Let's walk through your example:**
+
+1.  **Your YAML block:**
+    ```yaml
+    save_from_response:
+      primaryInsurerName: "obja.id2.insurers[type=primary].name"
+    ```
+
+2.  **The function call inside `processSaveFromResponse`:**
+    ```javascript
+    const value = getValueFromObject(responseBody, "obja.id2.insurers[type=primary].name");
+    ```
+
+3.  **How the new `getValueFromObject` processes the path:**
+    *   **Loop 1:** It sees `"obja"` as the first segment. It accesses `responseBody['obja']`. `currentContext` is now the `obja` object. `remainingPath` becomes `"id2.insurers[type=primary].name"`.
+    *   **Loop 2:** It sees `"id2"` as the next segment. It accesses `currentContext['id2']`. `currentContext` is now the `id2` object. `remainingPath` becomes `"insurers[type=primary].name"`.
+    *   **Loop 3:** It sees `"insurers[type=primary]"` as the next segment. The regex identifies this as an array query.
+        *   It accesses `currentContext['insurers']` to get the array.
+        *   It searches the array for an object where `type` equals `primary`.
+        *   `currentContext` becomes the found object (e.g., `{ "id": "ins-xyz", "name": "Primary National", ... }`).
+        *   `remainingPath` becomes `"name"`.
+    *   **Loop 4:** It sees `"name"` as the next segment. It accesses `currentContext['name']`.
+    *   **Result:** It returns `"Primary National"`.
+
+The `value` variable is correctly assigned, and this is then saved to your `flowContext` as `primaryInsurerName`. This robust iterative parsing approach ensures that complex paths with embedded array queries are handled correctly and reliably, no matter where they are used.
