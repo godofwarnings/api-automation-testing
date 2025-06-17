@@ -226,3 +226,231 @@ Your existing npm scripts will work perfectly. When you run `npm run test:bop:ht
 4.  On the third step, it will resolve both `{{flow.createdQuoteId}}` and `{{steps.create_quote_step.request.body.name}}` to build the new payload.
 
 This creates a powerful, declarative way to define and execute complex end-to-end API scenarios.
+
+
+
+Of course. You've hit on the exact limitation of the previous design. A truly powerful flow-testing engine must allow every step to be as flexible as the first one, including using template files for payloads.
+
+You are correct. The logic needs to be enhanced so that for *any* step in a flow, we can:
+1.  Point to a base template file (JSON or XML).
+2.  Fill in placeholders in that template using data from previous steps.
+
+Let's implement this. The core change will be a much smarter `resolvePlaceholders` function that operates on the actual payload content, not just strings in the YAML definition.
+
+---
+
+### **Step 1: The Enhanced YAML Flow**
+
+The YAML structure remains the same, but now we can use file-based payloads in any step.
+
+📁 `tests/products/bop/flows/create_and_update_quote.flow.yml` (Example)
+```yaml
+flow_id: "BOP_E2E_QUOTE_UPDATE"
+description: "Full workflow to create a quote and then update it"
+
+steps:
+  - step_id: "create_quote_step"
+    description: "Step 1: Create a new quote"
+    endpoint: "/post" # Using httpbin.org/post
+    method: "POST"
+    auth: "bearer"
+    headers:
+      Content-Type: "application/json"
+    payload:
+      # Use a template for the initial creation
+      file://templates/bop/createQuote_base.json
+    save_from_response:
+      createdQuoteId: "json.id" # Assume httpbin gives us back an "id"
+      requestHeaders: "headers" # Save the entire headers object from the response
+
+  - step_id: "update_quote_step"
+    description: "Step 2: Update the newly created quote"
+    endpoint: "/put" # Using httpbin.org/put
+    method: "PUT"
+    auth: "bearer"
+    headers:
+      Content-Type: "application/json"
+      # You can even use saved variables in headers
+      X-Original-Request-ID: "{{flow.requestHeaders.X-Amzn-Trace-Id}}"
+    payload:
+      # CRUCIAL: Step 2 now ALSO uses a template file
+      file://templates/bop/updateQuote_base.json
+```
+
+---
+
+### **Step 2: Create the New Template File for the Second Step**
+
+This template contains placeholders that will be filled by the flow executor.
+
+📁 `templates/bop/updateQuote_base.json` (New File)
+```json
+{
+  "quoteId": "{{flow.createdQuoteId}}",
+  "status": "updated",
+  "updatedBy": "AutomationFlow"
+}
+```
+
+---
+
+### **Step 3: The Smarter `test-executor.ts`**
+
+This is where the magic happens. We will completely replace the old, simple `resolvePlaceholders` function with a more robust system that can handle file loading and recursive object traversal.
+
+📁 **`src/core/test-executor.ts`** (Updated `executeApiFlows` and new helpers)
+```typescript
+// --- Keep all existing imports, interfaces, and executeApiTests() ---
+// ...
+
+// --- NEW: Type Definitions for Flows (Unchanged) ---
+interface FlowStep extends TestCase { /* ... */ }
+interface ApiFlow { /* ... */ }
+
+// --- NEW: Main Executor for Flows (Updated Logic) ---
+export function executeApiFlows(flowYamlPath: string) {
+  if (!fs.existsSync(flowYamlPath)) {
+    throw new Error(`FATAL: Flow definition file not found: ${flowYamlPath}`);
+  }
+  
+  const flow: ApiFlow = yaml.load(fs.readFileSync(flowYamlPath, 'utf8')) as ApiFlow;
+
+  test.describe.serial(`API Flow: ${flow.description}`, () => {
+    const flowContext: Record<string, any> = {};
+    const stepHistory: Record<string, { request: any, response: any }> = {};
+
+    for (const step of flow.steps) {
+      test(step.description, async ({ request, authedRequest }) => {
+        const apiRequest = step.auth === 'bearer' ? authedRequest : request;
+
+        // 1. Resolve placeholders in the current step before sending
+        const resolvedStep = await resolveStepPlaceholders(step, flowContext, stepHistory);
+
+        // 2. Send the request with the resolved payload and endpoint
+        const response = await sendRequest(apiRequest, resolvedStep);
+        const responseBody = response.ok() ? await tryParseJson(await response.text()) : null;
+
+        // 3. Save resolved request and response to history
+        stepHistory[step.step_id] = {
+            request: resolvedStep.payload ? tryParseJson(resolvedStep.payload) : null,
+            response: responseBody
+        };
+
+        // 4. Save values from the response to the flow context
+        if (response.ok() && step.save_from_response) {
+            processSaveFromResponse(responseBody, step.save_from_response, flowContext);
+        }
+
+        // 5. Assert success
+        expect(response.ok(), `API call for step '${step.description}' failed with status ${response.status()}`).toBeTruthy();
+      });
+    }
+  });
+}
+
+// --- NEW & IMPROVED: Helper Functions for Chaining ---
+
+/**
+ * Orchestrator function that loads payload from file and resolves all placeholders.
+ */
+async function resolveStepPlaceholders(step: FlowStep, flowContext: Record<string, any>, stepHistory: Record<string, any>): Promise<TestCase> {
+  const resolvedStep = JSON.parse(JSON.stringify(step)); // Deep copy
+  const context = { flow: flowContext, steps: stepHistory };
+
+  // Resolve placeholders in endpoint and headers first
+  if (resolvedStep.endpoint) {
+    resolvedStep.endpoint = resolvePlaceholdersInString(resolvedStep.endpoint, context);
+  }
+  if (resolvedStep.headers) {
+    resolvedStep.headers = resolvePlaceholdersInObject(resolvedStep.headers, context);
+  }
+
+  // If payload is a file, load it and then resolve placeholders in its content
+  if (typeof resolvedStep.payload === 'string' && resolvedStep.payload.startsWith('file://')) {
+    const filePath = path.join(process.cwd(), resolvedStep.payload.replace('file://', ''));
+    if (!fs.existsSync(filePath)) throw new Error(`Payload file not found: ${filePath}`);
+    
+    let fileContent = fs.readFileSync(filePath, 'utf8');
+    
+    // Check if the file is JSON or XML/text
+    if (filePath.endsWith('.json')) {
+      const jsonContent = JSON.parse(fileContent);
+      resolvedStep.payload = resolvePlaceholdersInObject(jsonContent, context);
+    } else {
+      resolvedStep.payload = resolvePlaceholdersInString(fileContent, context);
+    }
+  } else if (typeof resolvedStep.payload === 'object' && resolvedStep.payload !== null) {
+    // If payload is an inline object in the YAML
+    resolvedStep.payload = resolvePlaceholdersInObject(resolvedStep.payload, context);
+  }
+
+  return resolvedStep;
+}
+
+/**
+ * Resolves placeholders in a simple string.
+ */
+function resolvePlaceholdersInString(text: string, context: any): string {
+  const placeholderRegex = /\{\{([\w\.]+)\}\}/g;
+  return text.replace(placeholderRegex, (match, placeholderPath) => {
+    const value = getValueFromObject(context, placeholderPath);
+    return value !== undefined ? String(value) : match; // Return original placeholder if not found
+  });
+}
+
+/**
+ * Recursively traverses any object/array and resolves placeholders. Preserves types.
+ */
+function resolvePlaceholdersInObject(data: any, context: any): any {
+  if (Array.isArray(data)) {
+    return data.map(item => resolvePlaceholdersInObject(item, context));
+  }
+  if (typeof data === 'object' && data !== null) {
+    const newObj: { [key: string]: any } = {};
+    for (const key in data) {
+      newObj[key] = resolvePlaceholdersInObject(data[key], context);
+    }
+    return newObj;
+  }
+  if (typeof data === 'string') {
+    const placeholderRegex = /^\{\{([\w\.]+)\}\}$/; // Matches if string IS a placeholder
+    const match = data.match(placeholderRegex);
+    if (match) {
+      // It's an exact match, so return the value with its original type
+      const value = getValueFromObject(context, match[1]);
+      return value !== undefined ? value : data;
+    } else {
+      // It's a string with placeholders inside, do simple string replacement
+      return resolvePlaceholdersInString(data, context);
+    }
+  }
+  return data; // Return numbers, booleans, null as-is
+}
+
+/**
+ * Extracts values from a response and saves them to the flow context.
+ */
+function processSaveFromResponse(responseBody: any, rules: Record<string, string>, flowContext: Record<string, any>) {
+  // ... (This function remains unchanged from the previous version)
+}
+
+function getValueFromObject(obj: any, path: string): any {
+  // ... (This function remains unchanged)
+}
+
+// Ensure the rest of the file (sendRequest, assertBody, etc.) is present.
+```
+
+### **How This Works**
+
+1.  **Orchestration in `resolveStepPlaceholders`**: This new function is the key. Before executing a step, it's called to prepare the `TestCase` object.
+2.  **File Loading First**: It checks if `step.payload` is a file path. If so, it reads the file's content *into memory*.
+3.  **Content-Aware Replacement**:
+    *   If the file was a `.json` file, it parses the content into a JavaScript object and calls the new `resolvePlaceholdersInObject` function.
+    *   If the file was `.xml` or `.txt`, it calls `resolvePlaceholdersInString` to do a simple find-and-replace.
+4.  **Recursive and Type-Preserving**: The `resolvePlaceholdersInObject` function is now recursive.
+    *   It traverses nested objects and arrays.
+    *   Crucially, if a string value is an *exact* match for a placeholder (e.g., `"quoteId": "{{flow.createdQuoteId}}"`), it replaces the placeholder with the *actual value and its type*. If `createdQuoteId` was the number `123`, the final payload will have `"quoteId": 123`, not `"quoteId": "123"`. This is critical for type-sensitive APIs.
+5.  **Final `sendRequest`**: The `sendRequest` function receives the fully resolved, final payload object or string and sends it, just as it did before.
+
+This design is much more powerful and aligns perfectly with your requirement to use template files at any stage of an end-to-end flow.
