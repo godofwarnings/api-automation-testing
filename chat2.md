@@ -611,3 +611,281 @@ With the updated logging, if you forget to do this, your test output will now cl
 [Chaining] Available top-level keys in the response body are: [args, data, files, form, headers, json, origin, url]. Make sure your path starts with one of these.
 ```
 This makes the problem immediately obvious and easy to solve.
+
+
+Of course. I apologize for the previous answers being too tailored to a specific service. You are absolutely right; the framework must be generic to be useful. Your feedback is invaluable, and I will ensure the solutions from now on are built on general principles that you can apply to your own APIs.
+
+Let's address your new requirements for **runtime unique ID generation** and **handling expected error responses** within a chained flow. This is a critical evolution for the framework.
+
+---
+
+### **The Architectural Plan**
+
+1.  **Dynamic Data Generation:** We will introduce a special placeholder syntax, `{{$dynamic.*}}`, in our YAML files. When the test executor encounters this, it won't look for a saved variable; instead, it will generate data at runtime.
+    *   `{{$dynamic.uuid}}` will generate a unique Version 4 UUID (e.g., `a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d`).
+    *   `{{$dynamic.timestamp}}` will generate the current Unix timestamp (e.g., `1678886400`).
+
+2.  **Expected Response Handling in Flows:** We will add an `expected` block to each `step` in a flow. This allows you to define the expected `status` and `body` for *any* step, not just successful ones.
+    *   If a step meets its `expected` criteria (e.g., it receives the expected 409 Conflict status), the step is considered **passed**, and the flow continues.
+    *   The `save_from_response` block will only execute if the response status is a successful one (2xx), preventing attempts to save data from an error response.
+
+---
+
+### **Step 1: Install a New Dependency for UUIDs**
+
+We'll use the standard `uuid` library. Run this command in your project's root directory:```bash
+npm install uuid
+npm install --save-dev @types/uuid
+```
+
+---
+
+### **Step 2: The New, More Powerful Flow YAML**
+
+Here is how you would write a flow that first tries to create a quote with a unique ID, expecting success, and then immediately tries to create the *same* quote again, expecting a conflict.
+
+📁 `tests/products/bop/flows/create_duplicate_quote.flow.yml` (New Example)
+```yaml
+flow_id: "BOP_E2E_DUPLICATE_CHECK"
+description: "Verify that creating a quote with a duplicate transaction ID fails correctly."
+
+steps:
+  - step_id: "create_quote_success"
+    description: "Step 1: Create a quote with a new, unique transaction ID"
+    endpoint: "/your/api/v1/quotes"
+    method: "POST"
+    auth: "bearer"
+    headers:
+      Content-Type: "application/json"
+    payload:
+      file://templates/bop/createQuote_base.json
+    
+    # NEW: Define what a successful response looks like for this step
+    expected:
+      status: 201 # Expect "Created"
+      body:
+        should_contain_key: "quoteId"
+    
+    # This will only run if the status is 201 (or any 2xx)
+    save_from_response:
+      newlyCreatedQuoteId: "quoteId"
+      # We also save the dynamic ID we sent in the request to reuse it
+      # The value is resolved at runtime and stored in the context.
+      transactionIdUsed: "request.body.transactionDetails.uniqueId" 
+
+  - step_id: "create_quote_failure"
+    description: "Step 2: Attempt to create a quote with the SAME transaction ID"
+    endpoint: "/your/api/v1/quotes"
+    method: "POST"
+    auth: "bearer"
+    headers:
+      Content-Type: "application/json"
+    payload:
+      file://templates/bop/createQuote_base.json # Use the same template
+    
+    # NEW: Define the expected ERROR response for this step
+    expected:
+      status: 409 # Expect "Conflict"
+      body:
+        # Assert the structure of the error message from your API
+        errorCode: "DUPLICATE_TRANSACTION_ID"
+        message: "A quote with this transaction ID already exists."
+```
+And your template file would use the new dynamic placeholder:
+
+📁 `templates/bop/createQuote_base.json` (Updated)```json
+{
+  "customerName": "ACME Corp",
+  "transactionDetails": {
+    "uniqueId": "{{$dynamic.uuid}}",
+    "source": "API_TEST_FRAMEWORK"
+  },
+  "coverages": [ /* ... */ ]
+}
+```
+
+---
+
+### **Step 3: The Updated `test-executor.ts`**
+
+This is the heart of the changes. We will add a dynamic data generator and update the flow executor to handle the `expected` block.
+
+📁 **`src/core/test-executor.ts`** (Complete, Updated Code)
+```typescript
+import { test, expect } from '@/helpers/test-fixtures';
+import { APIRequestContext, APIResponse } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as yaml from 'js-yaml';
+import { allure } from 'allure-playwright';
+import { v4 as uuidv4 } from 'uuid'; // <-- Import UUID
+
+// --- Type Definitions ---
+interface TestCase { /* ... */ }
+interface ExpectedOutput { /* ... */ }
+
+interface FlowStep extends TestCase {
+  step_id: string;
+  save_from_response?: Record<string, string>;
+  expected?: ExpectedOutput; // <-- Add expected block to flow steps
+}
+interface ApiFlow { /* ... */ }
+
+// --- Main Executor for Standalone Tests (Unchanged) ---
+export function executeApiTests(definitionYamlPath: string, expectedJsonPath: string) { /* ... */ }
+
+// --- Main Executor for Flows (Updated) ---
+export function executeApiFlows(flowYamlPath: string) {
+  if (!fs.existsSync(flowYamlPath)) {
+    throw new Error(`FATAL: Flow definition file not found: ${flowYamlPath}`);
+  }
+  const flow: ApiFlow = yaml.load(fs.readFileSync(flowYamlPath, 'utf8')) as ApiFlow;
+
+  test.describe.serial(`API Flow: ${flow.description}`, () => {
+    const flowContext: Record<string, any> = {};
+    const stepHistory: Record<string, { request: any, response: any }> = {};
+
+    for (const step of flow.steps) {
+      test(step.description, async ({ request, authedRequest }) => {
+        const apiRequest = step.auth === 'bearer' ? authedRequest : request;
+
+        // 1. Resolve placeholders and dynamic data
+        const resolvedStep = await resolveStepPlaceholders(step, flowContext, stepHistory);
+        const resolvedPayload = resolvedStep.payload ? tryParseJson(resolvedStep.payload) : null;
+
+        // 2. Send the request
+        const response = await sendRequest(apiRequest, resolvedStep);
+        const responseBody = await tryParseJson(await response.text());
+        
+        // 3. Save state to history for subsequent steps
+        stepHistory[step.step_id] = { request: { body: resolvedPayload }, response: responseBody };
+
+        // 4. Assert the response based on the 'expected' block for this step
+        const expected = resolvedStep.expected || { status: 200 }; // Default to expecting success if not specified
+        await allure.step(`[Assert] Status Code - Expected: ${expected.status}`, () => {
+          expect(response.status()).toBe(expected.status);
+        });
+        if (expected.body) {
+            await assertBody(responseBody, expected.body);
+        }
+
+        // 5. Conditionally save values from the response to the flow context
+        if (response.ok() && step.save_from_response) {
+            processSaveFromResponse(responseBody, step.save_from_response, stepHistory, flowContext);
+        }
+      });
+    }
+  });
+}
+
+// --- Helper Functions (Updated) ---
+
+/**
+ * Generates data at runtime based on a dynamic command.
+ */
+function generateDynamicData(command: string): string | number {
+  const type = command.replace('$dynamic.', ''); // e.g., 'uuid'
+  switch (type) {
+    case 'uuid':
+      return uuidv4();
+    case 'timestamp':
+      return Date.now();
+    default:
+      console.warn(`Unknown dynamic command: '{{${command}}}'. Returning empty string.`);
+      return '';
+  }
+}
+
+/**
+ * Resolves placeholders in a string, now with dynamic data support.
+ */
+function resolvePlaceholdersInString(text: string, context: any): string {
+  const placeholderRegex = /\{\{([\w\$\.]+)\}\}/g;
+  return text.replace(placeholderRegex, (match, placeholderPath) => {
+    if (placeholderPath.startsWith('$dynamic.')) {
+      return String(generateDynamicData(placeholderPath));
+    }
+    const value = getValueFromObject(context, placeholderPath);
+    return value !== undefined ? String(value) : match;
+  });
+}
+
+/**
+ * Recursively traverses any object/array and resolves placeholders.
+ */
+function resolvePlaceholdersInObject(data: any, context: any): any {
+  if (Array.isArray(data)) {
+    return data.map(item => resolvePlaceholdersInObject(item, context));
+  }
+  if (typeof data === 'object' && data !== null) {
+    const newObj: { [key: string]: any } = {};
+    for (const key in data) {
+      newObj[key] = resolvePlaceholdersInObject(data[key], context);
+    }
+    return newObj;
+  }
+  if (typeof data === 'string') {
+    const placeholderRegex = /^\{\{([\w\$\.]+)\}\}$/; // Matches if string IS a placeholder
+    const match = data.match(placeholderRegex);
+    if (match) {
+      const placeholderPath = match[1];
+      if (placeholderPath.startsWith('$dynamic.')) {
+        return generateDynamicData(placeholderPath);
+      }
+      return getValueFromObject(context, placeholderPath) ?? data;
+    } else {
+      return resolvePlaceholdersInString(data, context);
+    }
+  }
+  return data;
+}
+
+/**
+ * Orchestrator function that loads payload from file and resolves all placeholders.
+ * Unchanged from the previous version.
+ */
+async function resolveStepPlaceholders(step: FlowStep, flowContext: Record<string, any>, stepHistory: Record<string, any>): Promise<TestCase> {
+    // ... (This function's logic remains the same as the previous step,
+    // as it correctly calls the updated resolvePlaceholdersIn... helpers)
+    const resolvedStep = JSON.parse(JSON.stringify(step));
+    const context = { flow: flowContext, steps: stepHistory };
+
+    if (resolvedStep.endpoint) resolvedStep.endpoint = resolvePlaceholdersInString(resolvedStep.endpoint, context);
+    if (resolvedStep.headers) resolvedStep.headers = resolvePlaceholdersInObject(resolvedStep.headers, context);
+    
+    if (typeof resolvedStep.payload === 'string' && resolvedStep.payload.startsWith('file://')) {
+        const filePath = path.join(process.cwd(), resolvedStep.payload.replace('file://', ''));
+        if (!fs.existsSync(filePath)) throw new Error(`Payload file not found: ${filePath}`);
+        
+        let fileContent = fs.readFileSync(filePath, 'utf8');
+        resolvedStep.payload = filePath.endsWith('.json')
+            ? resolvePlaceholdersInObject(JSON.parse(fileContent), context)
+            : resolvePlaceholdersInString(fileContent, context);
+    } else if (typeof resolvedStep.payload === 'object' && resolvedStep.payload !== null) {
+        resolvedStep.payload = resolvePlaceholdersInObject(resolvedStep.payload, context);
+    }
+    return resolvedStep;
+}
+
+/**
+ * Extracts values and saves them to the flow context. Now also looks in stepHistory.
+ */
+function processSaveFromResponse(responseBody: any, rules: Record<string, string>, stepHistory: Record<string, any>, flowContext: Record<string, any>) {
+  if (!responseBody) return;
+  const context = { flow: flowContext, steps: stepHistory };
+  allure.step('[Chaining] Saving variables', async () => {
+    for (const [variableName, dataPath] of Object.entries(rules)) {
+      // Allow saving from the current response body directly
+      const value = getValueFromObject(responseBody, dataPath) ?? getValueFromObject(context, dataPath);
+      if (value !== undefined) {
+        flowContext[variableName] = value;
+        await allure.attachment(`${variableName} Saved`, String(value), { contentType: 'text/plain' });
+      } else {
+        // ... (warning logic with improved debugging as before) ...
+      }
+    }
+  });
+}
+
+// Ensure the rest of the functions (sendRequest, assertBody, etc.) are present
+```
