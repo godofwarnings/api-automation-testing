@@ -889,3 +889,150 @@ function processSaveFromResponse(responseBody: any, rules: Record<string, string
 
 // Ensure the rest of the functions (sendRequest, assertBody, etc.) are present
 ```
+
+
+
+That's an excellent and very important question. You've correctly identified a potential ambiguity in how `should_contain_key` works.
+
+To give you a direct and generic answer: **No, the current implementation of `should_contain_key` does not recursively search the entire object.**
+
+It checks for a property at a specific path from the root of the object using dot notation. For example, `user.profile.id` checks if the `actualBody` has a `user` property, which has a `profile` property, which has an `id` property.
+
+This is powerful, but it doesn't solve the use case where you want to know if a key exists *anywhere* in a nested structure.
+
+Let's enhance the framework to give you both capabilities:
+1.  **Check for a specific nested key path (the current behavior).**
+2.  **Check if a key exists anywhere, recursively.**
+3.  **Check for the *value* of a nested key.**
+
+---
+
+### **The Solution: Clarifying and Expanding Our Assertion Logic**
+
+We will introduce a new keyword, `should_recursively_contain_key`, to handle the deep search, and clarify how to check for nested values using `toMatchObject`.
+
+#### **How to Use the Different Assertion Methods**
+
+**Use Case 1: Asserting a specific nested key *path* exists (Current behavior)**
+This is the best way to validate the structure of your response.
+
+**YAML:**
+```yaml
+expected:
+  status: 200
+  body:
+    should_contain_key: "transaction.details.transactionId"
+```
+This checks that the response looks like `{ "transaction": { "details": { "transactionId": "some-value" } } }`.
+
+**Use Case 2: Asserting the *value* of a nested key**
+This is the most common use case for validation. You use the standard `body` object, mirroring the structure you expect. `toMatchObject` handles this perfectly.
+
+**YAML:**
+```yaml
+expected:
+  status: 200
+  body:
+    # Mirror the nested structure of the expected response
+    transaction:
+      status: "COMPLETED"
+      details:
+        transactionId: "{{flow.transactionIdUsed}}" # Can even use variables
+```
+
+**Use Case 3: Asserting a key exists *anywhere* in the response (New Feature)**
+This is useful for things like error responses where an `error_code` key might appear at different nesting levels.
+
+**YAML:**
+```yaml
+expected:
+  status: 400
+  body:
+    should_recursively_contain_key: "error_code"
+```
+This will find the `error_code` key whether the response is `{"error_code": 123}` or `{"errors": [{"details": {"error_code": 123}}]}`.
+
+---
+
+### **The Code: Updating `test-executor.ts`**
+
+We will add a new helper function, `findKeyRecursively`, and update `assertBody` to use our new keyword.
+
+📁 **`src/core/test-executor.ts`** (Updated `assertBody` and new helper)
+```typescript
+// ... (All other code in the file remains the same) ...
+// ... (imports, interfaces, executeApiFlows, sendRequest, etc.) ...
+
+/**
+ * Contains the logic for asserting the response body, now with recursive checking.
+ */
+async function assertBody(actualBody: any, expectedBody: ExpectedOutput['body']) {
+  if (expectedBody === undefined) return;
+
+  await allure.step('[Assert] Response Body', async () => {
+    if (expectedBody === null) {
+      expect(actualBody, "Expected response body to be null or empty.").toBeNull();
+    } else if (typeof expectedBody === 'string') {
+      expect(actualBody, "Expected an exact string match.").toBe(expectedBody);
+    } else if (typeof actualBody === 'object' && actualBody !== null) {
+      // --- NEW LOGIC ORDER ---
+      if (expectedBody.should_recursively_contain_key) {
+        // Use Case 3: Find a key anywhere in the nested structure
+        const targetKey = expectedBody.should_recursively_contain_key;
+        const keyFound = findKeyRecursively(actualBody, targetKey);
+        expect(keyFound, `Expected key '${targetKey}' to exist anywhere in the response body.`).toBe(true);
+
+      } else if (expectedBody.should_contain_key) {
+        // Use Case 1: Check for a specific key path from the root
+        const keyPath = expectedBody.should_contain_key;
+        expect(actualBody, `Expected key path '${keyPath}' not found in response body.`).toHaveProperty(keyPath);
+        
+      } else {
+        // Use Case 2: Check for structure and values using partial matching
+        expect(actualBody, "Expected JSON body to match the provided structure and values.").toMatchObject(expectedBody);
+      }
+    } else {
+      // Handle cases where we expect an object but don't get one
+      throw new Error(`Type mismatch: Expected body to be an object, but received type '${typeof actualBody}'. Actual Body: ${actualBody}`);
+    }
+  });
+}
+
+/**
+ * A new helper function to recursively search for a key in an object or array.
+ * @param data The object or array to search within.
+ * @param targetKey The key to search for.
+ * @returns True if the key is found, otherwise false.
+ */
+function findKeyRecursively(data: any, targetKey: string): boolean {
+  if (typeof data !== 'object' || data === null) {
+    return false;
+  }
+
+  // Check the keys of the current object
+  if (targetKey in data) {
+    return true;
+  }
+
+  // Recurse into the values of the current object/array
+  for (const key in data) {
+    if (findKeyRecursively(data[key], targetKey)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// Ensure the rest of the test-executor.ts file (executeApiFlows, sendRequest, etc.)
+// is present. The only changes needed are in `assertBody` and the new `findKeyRecursively` function.
+// Also ensure `toHaveProperty` is available via `expect` from Playwright.
+```
+
+### **Summary of the Solution**
+
+1.  **No Breaking Changes:** We kept the original behavior of `should_contain_key` because checking a specific path is a precise and valuable assertion. It uses Playwright's built-in `toHaveProperty` which supports dot notation (e.g., `'a.b.c'`).
+2.  **New Feature:** We added a new, clearly named property, `should_recursively_contain_key`, for the deep search functionality.
+3.  **New Helper Function:** The `findKeyRecursively` function provides the logic for the deep search, handling both nested objects and arrays.
+4.  **Clearer `assertBody` Logic:** The `assertBody` function now has a clear `if/else if/else` structure to handle the different assertion types, making it easy to understand and extend in the future.
+5.  **Empowerment:** You are now empowered to write assertions that are as strict or as flexible as you need them to be. You can validate entire object structures, check for the existence of a specific nested property, or just confirm that a key is present *somewhere* in the response.
