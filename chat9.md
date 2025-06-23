@@ -167,3 +167,132 @@ async function saveResponseBodyToFile(
 6.  **Raw Buffer Handling:** We correctly use `response.body()` to get the raw `Buffer`, which is essential for correctly saving binary files like images or PDFs without corruption.
 
 This feature is now fully implemented. Shall we proceed to your second requirement: `save_from_body`?
+
+Excellent point. A robust framework should always have sensible defaults to reduce boilerplate configuration and prevent errors. Forgetting a configuration detail should not break the test run.
+
+Let's refactor the `saveResponseBodyToFile` helper function to include these defaults.
+
+### **The Defaulting Strategy**
+
+1.  **If `output_dir` is not provided:** We will default to a root-level directory named `test_downloads/`. This keeps downloaded artifacts separate from reports or other generated code.
+2.  **If `filename` is not provided:** We will create a default filename that is still highly useful for debugging. A good default would be: `[test_id]_[timestamp]`. This guarantees uniqueness and traceability.
+3.  **If the entire `save_response_body` block is just `enabled: true`:** We will apply all the defaults.
+
+---
+
+### **The Updated `saveResponseBodyToFile` Function**
+
+Here is the updated helper function within `test-executor.ts`. This is the only part of the code that needs to be changed.
+
+📁 **`src/core/test-executor.ts`** (The updated helper function)
+```typescript
+/**
+ * Saves the raw response body to a file with a user-defined filename.
+ * Includes sensible defaults if parts of the configuration are omitted.
+ */
+async function saveResponseBodyToFile(
+  response: APIResponse,
+  bodyBuffer: Buffer,
+  step: FlowStep,
+  flowContext: Record<string, any>,
+  stepHistory: Record<string, any>
+) {
+  // Gracefully handle if config is just `true` or an empty object
+  const config = typeof step.save_response_body === 'object' ? step.save_response_body : {};
+  const context = { flow: flowContext, steps: stepHistory, testCase: step };
+
+  await allure.step(`[SAVE] Saving response body to file`, async () => {
+    // --- APPLY DEFAULTS ---
+    
+    // 1. Default output directory
+    const outputDir = config.output_dir 
+      ? path.join(process.cwd(), config.output_dir) 
+      : path.join(process.cwd(), 'test_downloads'); // Sensible default directory
+
+    // 2. Default filename template
+    const filenameTemplate = config.filename || `${step.test_id || step.step_id}_{{$dynamic.timestamp}}`; // Default pattern
+
+    // --- End of Defaults ---
+
+    // 3. Resolve placeholders in the filename template
+    let resolvedFilename = resolvePlaceholdersInString(filenameTemplate, context);
+
+    // 4. Determine the file extension from the Content-Type header
+    const contentType = response.headers()['content-type'] || 'application/octet-stream';
+    let extension = 'bin'; // default extension
+    if (contentType.includes('json')) extension = 'json';
+    else if (contentType.includes('xml')) extension = 'xml';
+    else if (contentType.includes('pdf')) extension = 'pdf';
+    else if (contentType.includes('png')) extension = 'png';
+    else if (contentType.includes('jpeg')) extension = 'jpg';
+    else if (contentType.includes('text/plain')) extension = 'txt';
+    
+    // Sanitize filename to prevent path traversal issues and ensure it's valid
+    resolvedFilename = resolvedFilename.replace(/[<>:"/\\|?*]/g, '_'); // Replace invalid characters
+    const finalFilename = `${resolvedFilename}.${extension}`;
+
+    // 5. Create the directory if it doesn't exist
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+    const finalPath = path.join(outputDir, finalFilename);
+
+    // 6. Write the file
+    fs.writeFileSync(finalPath, bodyBuffer);
+
+    // 7. Add an Allure attachment and log the action
+    allure.attachment('Saved Response File', `File saved at: ${finalPath}`, 'text/plain');
+    log.info({ path: finalPath }, `Response body saved to file.`);
+  });
+}
+```
+
+### **How to Use the Defaulting Feature**
+
+Your users now have much more flexibility in the YAML definition.
+
+**Scenario 1: Full Configuration (as before)**
+This still works perfectly.
+```yaml
+save_response_body:
+  enabled: true
+  filename: "proposal_{{flow.savedProposalId}}"
+  output_dir: "test-results/downloads/bop"
+```
+*   **Result:** A file named `proposal_p-456.pdf` will be saved in `test-results/downloads/bop/`.
+
+**Scenario 2: Omitting `output_dir`**
+```yaml
+save_response_body:
+  enabled: true
+  filename: "proposal_{{flow.savedProposalId}}"
+```
+*   **Result:** A file named `proposal_p-456.pdf` will be saved in the default `test_downloads/` directory at the project root.
+
+**Scenario 3: Omitting `filename`**
+```yaml
+save_response_body:
+  enabled: true
+  output_dir: "test-results/downloads/bop"
+```
+*   **Result:** A file with a name like `get_proposal_pdf_1678890000123.pdf` will be saved in `test-results/downloads/bop/`. (Uses the `step_id` and a timestamp).
+
+**Scenario 4: The Simplest Form**
+This is for when the user just wants to save the file and doesn't care about the name or location.
+```yaml
+save_response_body:
+  enabled: true
+```
+*   **Result:** A file with a name like `get_proposal_pdf_1678890000123.pdf` will be saved in the default `test_downloads/` directory.
+
+**A small but important change:**
+Inside the `executeApiFlows` (or `executeApiTests`) loop, we should check `if (resolvedStep.save_response_body)`. The check for `.enabled` is now implicitly handled by the presence of the block itself. If the block exists, we assume the user wants to save.
+
+```typescript
+// Inside the test executor loop
+if (resolvedStep.save_response_body) { // Check for the block's existence
+  await saveResponseBodyToFile(response, responseBodyBuffer, resolvedStep, flowContext, stepHistory);
+}
+```
+
+This makes the feature much more user-friendly and robust. The user only needs to provide configuration when they want to override the sensible defaults.
