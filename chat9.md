@@ -295,4 +295,207 @@ if (resolvedStep.save_response_body) { // Check for the block's existence
 }
 ```
 
+
+Excellent. Let's design and implement the `save_from_body` feature.
+
+This feature is the logical counterpart to `save_from_response`. Its purpose is to capture data from the **request body** and save it to the `flowContext` for use in later steps. This is particularly useful for saving the resolved value of a dynamic placeholder, like a `{{$dynamic.uuid}}`, that was sent in a request.
+
+---
+
+### **The Architectural Plan**
+
+1.  **New YAML Block (`save_from_request`):** To avoid ambiguity with the response, we will name the new block `save_from_request`. This makes its purpose explicit. It will live alongside `save_from_response` in the YAML step definition.
+2.  **Timing of Execution:** This save operation must happen *after* all placeholders in the payload have been resolved, but *before* the request is sent. The best place for this is right after `resolveStepPlaceholders` is called.
+3.  **Update the Test Executor:** We'll add a new helper function, `processSaveFromRequest`, and call it from the main `executeApiFlows` loop.
+
+---
+
+### **Step 1: The New YAML Syntax**
+
+Here is how you would use `save_from_request` in a flow. This example solves the exact "duplicate quote" problem we discussed earlier in a very clear way.
+
+📁 `tests/products/bop/flows/create_duplicate_quote.flow.yml` (Updated)
+```yaml
+flow_id: "BOP_E2E_DUPLICATE_CHECK"
+description: "Verify that creating a quote with a duplicate transaction ID fails correctly."
+
+steps:
+  - step_id: "create_quote_success"
+    description: "Step 1: Create a quote with a new, unique transaction ID"
+    endpoint: "/your/api/v1/quotes"
+    method: "POST"
+    auth: "bearer"
+    headers:
+      Content-Type: "application/json"
+    payload:
+      file://templates/bop/createQuote_base.json # This file contains {{$dynamic.uuid}}
+    
+    # --- NEW BLOCK ---
+    save_from_request:
+      # Save the dynamically generated UUID from the resolved request body
+      # The path is relative to the payload.
+      transactionIdSent: "body.transactionDetails.uniqueId"
+
+    expected:
+      status: 201
+      body:
+        should_contain_key: "quoteId"
+    save_from_response:
+      newlyCreatedQuoteId: "quoteId"
+
+  - step_id: "create_quote_failure"
+    description: "Step 2: Attempt to create a quote with the SAME transaction ID"
+    endpoint: "/your/api/v1/quotes"
+    method: "POST"
+    auth: "bearer"
+    headers:
+      Content-Type: "application/json"
+    payload:
+      # This template now uses the variable we just saved from the previous request
+      file://templates/bop/createQuote_with_existing_id.json
+    expected:
+      status: 409
+```
+
+And the new template for the second step would be:
+
+📁 `templates/bop/createQuote_with_existing_id.json` (New File)
+```json
+{
+  "customerName": "ACME Corp",
+  "transactionDetails": {
+    "uniqueId": "{{flow.transactionIdSent}}",
+    "source": "API_TEST_FRAMEWORK_DUPLICATE"
+  }
+}
+```
+
+---
+
+### **Step 2: The Code Implementation**
+
+We will add a new helper function to `test-executor.ts` and update the `FlowStep` interface and the main `executeApiFlows` loop.
+
+📁 **`src/core/test-executor.ts`** (Updated `interfaces` and new logic)
+```typescript
+// ... (imports and other interfaces) ...
+
+// --- Type Definitions (Updated) ---
+interface FlowStep extends TestCase {
+  step_id: string;
+  save_from_response?: Record<string, string>;
+  save_from_request?: Record<string, string>; // <-- NEW
+  expected?: ExpectedOutput;
+  // ... other properties
+}
+
+// ... other interfaces ...
+
+
+// --- Main Executor for Flows (Updated) ---
+export function executeApiFlows(flowYamlPath: string) {
+  // ... (setup logic: loading file, test.describe.serial, etc.) ...
+  
+  test.describe.serial(`API Flow: ${flow.description}`, () => {
+    const flowContext: Record<string, any> = {};
+    const stepHistory: Record<string, { request: any, response: any }> = {};
+
+    for (const step of flow.steps) {
+      test(step.description, async ({ request, authedRequest }) => {
+        const apiRequest = step.auth === 'bearer' ? authedRequest : request;
+
+        // 1. Resolve all placeholders (including dynamic ones) in the step
+        const resolvedStep = await resolveStepPlaceholders(step, flowContext, stepHistory);
+        const resolvedPayload = resolvedStep.payload ? tryParseJson(resolvedStep.payload) : null;
+
+        // 2. --- NEW LOGIC ---
+        // Save values from the resolved request body BEFORE sending the request
+        if (step.save_from_request) {
+          processSaveFromRequest(resolvedPayload, step.save_from_request, flowContext);
+        }
+
+        // 3. Send the request
+        const response = await sendRequest(apiRequest, resolvedStep);
+        const responseBody = response.ok() ? await tryParseJson(await response.text()) : null;
+
+        // 4. Save the full state to history
+        stepHistory[step.step_id] = { request: { body: resolvedPayload }, response: responseBody };
+
+        // 5. Assertions
+        // ...
+
+        // 6. Save from response (existing logic)
+        if (response.ok() && step.save_from_response) {
+          processSaveFromResponse(responseBody, step.save_from_response, flowContext);
+        }
+
+        // 7. Save response body to file (existing logic)
+        // ...
+      });
+    }
+  });
+}
+
+
+// --- NEW HELPER FUNCTION (add this to the bottom of the file) ---
+
+/**
+ * Extracts values from a resolved request payload and saves them to the flow context.
+ * @param resolvedPayload The final request payload object after all placeholders are resolved.
+ * @param rules The rules defining what to save, from the 'save_from_request' block.
+ * @param flowContext The context object to save the variables into.
+ */
+function processSaveFromRequest(
+  resolvedPayload: any,
+  rules: Record<string, string>,
+  flowContext: Record<string, any>
+) {
+  // The path starts with "body." but our resolvedPayload IS the body, so we strip it.
+  const pathPrefix = "body.";
+  
+  if (!resolvedPayload || typeof resolvedPayload !== 'object') {
+    log.warn(`[Chaining] Cannot save from request because the payload is not a valid object.`);
+    return;
+  }
+  
+  allure.step('[SAVE] Saving variables from request body', async () => {
+    for (const [variableName, dataPath] of Object.entries(rules)) {
+      let cleanPath = dataPath;
+      if (dataPath.startsWith(pathPrefix)) {
+        cleanPath = dataPath.substring(pathPrefix.length);
+      } else {
+        log.warn(`[Chaining] 'save_from_request' path '${dataPath}' should start with 'body.'. Proceeding with the original path.`);
+      }
+
+      const value = getValueFromObject(resolvedPayload, cleanPath);
+      
+      if (value !== undefined) {
+        flowContext[variableName] = value;
+        await allure.attachment(`${variableName} Saved (from request)`, String(value), { contentType: 'text/plain' });
+        log.info({ variable: variableName, value: String(value) }, `Saved variable from request body.`);
+      } else {
+        log.warn({ path: dataPath }, `Could not find path in request body to save as '${variableName}'.`);
+      }
+    }
+  });
+}
+
+// Ensure the rest of the file (getValueFromObject, processSaveFromResponse, etc.) is present.
+```
+
+### **Summary of the Changes**
+
+1.  **YAML Enhancement:** We've added a new `save_from_request` block that is syntactically identical to `save_from_response`, making it intuitive for users.
+2.  **New Helper Function:** The `processSaveFromRequest` function encapsulates the logic for extracting data from the resolved payload. It's smart enough to handle the `body.` prefix that users will naturally want to write.
+3.  **Correct Execution Order:** In the main `executeApiFlows` loop, we now have a clear and logical sequence:
+    1.  Resolve all placeholders.
+    2.  **Save data from the resolved request.**
+    3.  Send the request.
+    4.  Save the response to history.
+    5.  Run assertions.
+    6.  **Save data from the response.**
+    7.  Save the response body to a file.
+
+This new feature makes your framework's chaining capabilities much more powerful and elegantly solves the problem of reusing dynamically generated data in subsequent test steps.
+
 This makes the feature much more user-friendly and robust. The user only needs to provide configuration when they want to override the sensible defaults.
