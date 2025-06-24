@@ -179,3 +179,59 @@ for (const step of flow.steps) {
 5.  **File Saving is Correct:** The `saveResponseBodyToFile` logic is now called from the central handler, ensuring it has access to the raw buffer and correct file extension.
 
 This new structure is much more robust, correct, and aligns perfectly with your requirement to handle various response types properly in both Allure reports and file downloads.
+
+
+You are absolutely right. That is a small but very annoying issue that detracts from the professional feel of the framework. My apologies for that oversight.
+
+The problem lies in the `allure.attachment()` call for the response body, where I included the parentheses in the filename.
+
+Here is the simple and direct fix.
+
+---
+
+### **The Fix: Correcting the Attachment Name**
+
+The only function that needs to be changed is the `handleApiResponse` helper in `test-executor.ts`. We will simply adjust the string used for the attachment name.
+
+📁 **`src/core/test-executor.ts`** (The corrected part of the `handleApiResponse` function)
+```typescript
+async function handleApiResponse(
+  response: APIResponse,
+  step: FlowStep,
+  flowContext: Record<string, any>,
+  stepHistory: Record<string, any>
+): Promise<any> {
+  
+  const bodyBuffer = await response.body();
+  const { extension, mimeType } = getContentTypeDetails(response);
+  let parsedBody: any = null;
+
+  await allure.step(`[Result] Received Response (Status: ${response.status()})`, async () => {
+    // Attach headers (no change here)
+    await allure.attachment('Response Headers', JSON.stringify(response.headers(), null, 2), { contentType: 'application/json' });
+
+    if (bodyBuffer.length > 0) {
+      // --- THIS IS THE CORRECTED LINE ---
+      // The name of the attachment is just "Response Body", and Playwright/Allure
+      // will use the `contentType` to suggest the correct filename on download.
+      // By default, many browsers will use the name of the attachment as the base filename.
+      const attachmentName = `Response Body.${extension}`;
+      await allure.attachment(attachmentName, bodyBuffer, { contentType: mimeType });
+      // --- END OF FIX ---
+      
+      // ... (rest of the function: parsing body, etc.) ...
+    }
+  });
+
+  // ... (rest of the function: saving file) ...
+  
+  return parsedBody;
+}
+```
+
+### **Why This Fix Works**
+
+*   **Before:** The attachment name was `Response Body (.pdf)`. When you clicked "Download," the browser would suggest saving the file with that literal name, including the parentheses.
+*   **After:** The attachment name is now `Response Body.pdf`. When you click "Download," the browser will correctly suggest saving a file named `Response Body.pdf`.
+
+This is a small change, but it's crucial for user experience and correctness. The framework should handle file naming conventions properly without requiring manual cleanup from the user.
