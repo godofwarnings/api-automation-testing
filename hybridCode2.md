@@ -184,3 +184,187 @@ This file now uses a simpler `sourcePath` for the dynamic header, as it's readin
 6.  The request is sent, and the test completes.
 
 This demonstrates that the framework is fully capable of operating without the partner-centric design. By simply changing the configuration structure and adjusting the `global.setup.ts` to read from a different file structure, the rest of the engine (fixtures, orchestrator, functions) adapts seamlessly. This proves the flexibility of the abstracted design.
+
+
+# 2
+
+That is the perfect follow-up question. It addresses the core of how to make the framework flexible enough to handle both scenarios: partner-specific and non-partner-specific test runs, without needing two different frameworks.
+
+The solution is to make the "partner" concept a **pluggable configuration layer** that is loaded *on top of* the base environment configuration. The framework will be smart enough to detect whether a partner is specified and merge the configurations accordingly.
+
+---
+
+### **The Hybrid Configuration Architecture**
+
+We will support both modes by introducing a clear hierarchy:
+
+1.  **Base Environment Config:** A file like `config/environments/sit.config.json` provides the default settings for the SIT environment (e.g., the default host, default API versions).
+2.  **Partner Override Config:** A file like `config/partners/partner_a.json` provides settings that are **specific to Partner A**. This file can override the base settings or add new ones.
+
+The framework will merge these two configurations at runtime, with **partner-specific values taking precedence.**
+
+---
+
+### **Step 1: The Updated Configuration Structure**
+
+Let's define what these files would look like.
+
+📁 **`config/environments/sit.config.json` (The Base/Default)**
+```json
+{
+  "environmentName": "SIT",
+  "host": "https://api.sit.mycompany.com",
+  "products": {
+    "bop": {
+      "version": "1.2.3",
+      "auth_path": "/v2/authenticate"
+    },
+    "gl": {
+      "version": "2.5.0",
+      "auth_path": "/v2/gl/auth"
+    }
+  }
+}
+```
+
+📁 **`config/partners/partner_a.json` (The Override)**
+This file only needs to contain what is *different* for Partner A.
+```json
+{
+  "partnerName": "Partner A",
+  "partnerId": "P-001",
+  "host": "https://partnerA.api.sit.mycompany.com",
+  "products": {
+    "bop": {
+      "version": "1.2.5-beta",
+      "credential_source": "config/credentials/partner_a_creds.json"
+    }
+  }
+}
+```
+
+---
+
+### **Step 2: Update `global.setup.ts` to Handle Merging**
+
+This is the core of the implementation. `global.setup.ts` will now conditionally load and merge the partner config if a `--partner` argument is provided.
+
+📁 **`tests/global.setup.ts`** (Updated for Hybrid Mode)
+```typescript
+import { FullConfig } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
+import yargs from 'yargs/yargs';
+import { hideBin } from 'yargs/helpers';
+import * as dotenv from 'dotenv';
+import { merge } from 'lodash'; // A powerful library for deep merging objects
+
+dotenv.config();
+export const GLOBAL_RUN_CONFIG_FILE = path.join(__dirname, '..', '.tmp', 'run_config.json');
+
+// We need to install lodash for its powerful deep merge capability
+// Run: npm install lodash @types/lodash
+async function globalSetup(config: FullConfig) {
+  console.log('--- Running Global Setup (Hybrid Mode) ---');
+
+  // 1. Parse arguments. --partner is now OPTIONAL.
+  const argv = await yargs(hideBin(process.argv)).options({
+    env: { type: 'string', demandOption: true },
+    partner: { type: 'string' }, // No longer demandOption
+  }).argv;
+  const { env, partner } = argv;
+  
+  process.env.ENV = env;
+  if (partner) process.env.PARTNER = partner;
+
+  // 2. Load the BASE environment configuration
+  const envConfigPath = path.join(__dirname, '..', 'config', 'environments', `${env}.config.json`);
+  if (!fs.existsSync(envConfigPath)) {
+    throw new Error(`GlobalSetup Error: Base environment config not found at ${envConfigPath}`);
+  }
+  let finalConfig = JSON.parse(fs.readFileSync(envConfigPath, 'utf8'));
+
+  // 3. Conditionally load and MERGE the partner configuration
+  if (partner) {
+    console.log(`Partner specified: '${partner}'. Loading partner override configuration.`);
+    const partnerConfigPath = path.join(__dirname, '..', 'config', 'partners', `${partner}.json`);
+    if (fs.existsSync(partnerConfigPath)) {
+      const partnerConfig = JSON.parse(fs.readFileSync(partnerConfigPath, 'utf8'));
+      
+      // Deep merge the partner config on top of the base env config.
+      // Partner values will overwrite base values.
+      finalConfig = merge(finalConfig, partnerConfig);
+    } else {
+      console.warn(`Warning: Partner '${partner}' was specified, but config file not found at ${partnerConfigPath}. Using base config only.`);
+    }
+  } else {
+    console.log("No partner specified. Using base environment configuration.");
+  }
+
+  // 4. Create the consolidated run config object
+  const runConfig = {
+    currentEnv: env,
+    currentPartner: partner || 'default', // Note the partner name, or 'default'
+    baseURL: finalConfig.host, // This will be the partner host if it exists, otherwise the base host
+    configDetails: finalConfig, // Store the final, merged config
+  };
+
+  // 5. Save the final config to the temporary file
+  fs.mkdirSync(path.dirname(GLOBAL_RUN_CONFIG_FILE), { recursive: true });
+  fs.writeFileSync(GLOBAL_RUN_CONFIG_FILE, JSON.stringify(runConfig, null, 2));
+
+  console.log(`Global setup complete. Final configuration saved.`);
+}
+
+export default globalSetup;
+```
+
+**Important:** You will need to install `lodash` for this to work.
+```bash
+npm install lodash
+npm install --save-dev @types/lodash
+```
+
+---
+
+### **How it Works in Practice**
+
+Let's see what `runConfig.configDetails` looks like in different scenarios for the `sit` environment.
+
+**Scenario 1: Running WITHOUT a partner**
+*   **Command:** `npm run test:bop:sit`
+*   **`global.setup.ts`** loads only `sit.config.json`.
+*   **Final `baseURL`:** `https://api.sit.mycompany.com`
+*   **Final BOP version:** `1.2.3`
+
+**Scenario 2: Running WITH Partner A**
+*   **Command:** `npm run test:bop:sit:partner_a`
+*   **`global.setup.ts`** first loads `sit.config.json`, then loads `partner_a.json` and deep merges it on top.
+*   **The `merge` result:**
+    ```json
+    {
+      "environmentName": "SIT",
+      "host": "https://partnerA.api.sit.mycompany.com", // <-- Overridden by partner config
+      "partnerName": "Partner A", // <-- Added by partner config
+      "partnerId": "P-001",       // <-- Added by partner config
+      "products": {
+        "bop": {
+          "version": "1.2.5-beta", // <-- Overridden by partner config
+          "auth_path": "/v2/authenticate", // <-- Inherited from base config
+          "credential_source": "config/credentials/partner_a_creds.json" // <-- Added by partner config
+        },
+        "gl": { // <-- Entire object inherited from base config
+          "version": "2.5.0",
+          "auth_path": "/v2/gl/auth"
+        }
+      }
+    }
+    ```
+*   **Final `baseURL`:** `https://partnerA.api.sit.mycompany.com`
+*   **Final BOP version:** `1.2.5-beta`
+
+**How does this affect the rest of the framework?**
+
+It doesn't! The beauty of this design is that the rest of the framework (`auth.setup.ts`, fixtures, `test-executor.ts`) only ever reads from the final, merged `run_config.json`. They don't need to know or care whether a partner was specified or not. They just access the final values.
+
+For example, when a dynamic header looks for `config.configDetails.products.bop.version`, it will automatically get `1.2.5-beta` if running with Partner A, and `1.2.3` if running without. The system is completely seamless.
