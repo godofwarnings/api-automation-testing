@@ -197,3 +197,183 @@ test.describe.serial(`API Flow: ${flow.description}`, () => {
 ```
 
 This new design achieves all your goals for Phase 1. It creates a powerful abstraction layer where the flow is cleanly separated from the implementation details. Most importantly, by creating the `functionRegistry`, it provides a clear, scalable "plug-and-play" system for users to inject custom logic without ever touching the core engine, perfectly setting the stage for future UI integration.
+
+
+Excellent. This is the perfect time to make that conceptual leap. By designing the core executor to be agnostic of the test *type* (UI vs. API), we create the truly hybrid engine you envisioned.
+
+The key is that the executor's job is not to *do* the work, but to **prepare the context** and **delegate to the correct function**.
+
+Here is the conceptual design for the new, unified `executeFlow` function.
+
+---
+
+### **The Hybrid Engine: `executeFlow`**
+
+This function will be the single entry point for running any flow defined in a YAML file. It doesn't care if the steps are UI, API, or a mix of both.
+
+#### **1. The Hybrid YAML Flow File**
+
+The YAML structure we designed in the last step is already 99% of the way there. The `type` key is the critical switch that the hybrid engine will use.
+
+📁 `tests/flows/hybrid_quote_validation.flow.yml` (New Hybrid Example)
+```yaml
+flow_id: "HYBRID_E2E_QUOTE_TO_UI"
+description: "Create a quote via API and validate its details on the UI"
+
+steps:
+  - step_id: "create_quote_api"
+    description: "Step 1 (API): Create a new quote"
+    type: "api" # <-- The engine uses this to select the right context
+    function: "standard.sendRequest"
+    parameters_file: "tests/products/bop/params/create_quote_api_params.json"
+    save_from_response:
+      createdQuoteId: "quoteId"
+      quotePageUrl: "links.ui_url" # Assume the API response gives a direct link
+
+  - step_id: "navigate_to_quote_page_ui"
+    description: "Step 2 (UI): Navigate to the quote page"
+    type: "ui" # <-- The engine sees this and provides a 'page' object
+    function: "standard.navigateToUrl" # A standard, reusable UI function
+    parameters_file: "tests/ui/params/navigate_to_quote_params.json"
+
+  - step_id: "validate_quote_details_ui"
+    description: "Step 3 (UI): Validate quote details on the page"
+    type: "ui"
+    # A custom UI function that knows how to interact with the quote page
+    function: "custom.validateQuoteDetails" 
+    parameters_file: "tests/ui/params/validate_quote_details_params.json"
+```
+
+#### **2. The Unified `executeFlow` Function**
+
+This function will replace `executeApiFlows`. It uses a simple `switch` statement based on the step `type` to provide the correct "context" (e.g., `authedRequest` for API, `page` for UI) to the function being called.
+
+📁 **`src/core/test-executor.ts`** (The new `executeFlow` function)
+```typescript
+// At the top, you would import your page objects for UI tests
+// import { QuotePage } from '@/pages/quote-page';
+
+// The new unified executor
+export function executeFlow(flowYamlPath: string) {
+  // ... (logic to load and validate the flow YAML file) ...
+  const flow: ApiFlow = yaml.load(/* ... */) as ApiFlow;
+
+  test.describe.serial(`Hybrid Flow: ${flow.description}`, () => {
+    // --- Context Setup ---
+    // These contexts persist for the entire duration of the flow.
+    const flowContext: Record<string, any> = {}; // For saved variables
+    const stepHistory: Record<string, any> = {}; // For historical data
+
+    // --- Function Registry ---
+    // In a real implementation, this would dynamically load all functions from `src/functions`
+    const functionRegistry = {
+      'api.standard.sendRequest': sendRequest, // An API function
+      'ui.standard.navigateToUrl': navigateToUrl, // A standard UI function
+      'ui.custom.validateQuoteDetails': validateQuoteDetails, // A custom UI function
+    };
+
+    // --- Test Execution Loop ---
+    for (const step of flow.steps) {
+      // For UI tests, we need the 'page' fixture. For API, 'authedRequest'.
+      // We pass all available contexts to the test block.
+      test(step.description, async ({ page, authedRequest }) => {
+        // 1. Load and resolve parameters for the current step
+        const params = loadAndResolveParameters(step.parameters_file, { flow: flowContext, steps: stepHistory });
+        
+        // 2. Look up the function to execute
+        const functionToExecute = functionRegistry[step.function];
+        if (!functionToExecute) {
+          throw new Error(`Function '${step.function}' is not registered.`);
+        }
+
+        let result: any; // To store the result of the step (API response or UI data)
+
+        // 3. --- The Hybrid Switch ---
+        // Delegate to the function with the correct context based on the step 'type'.
+        allure.step(`[${step.type.toUpperCase()}] ${step.description}`, async () => {
+          switch (step.type) {
+            case 'api':
+              log.info({ function: step.function }, "Executing API step.");
+              result = await functionToExecute({
+                apiRequest: authedRequest,
+                params: params,
+                flowContext: flowContext
+              });
+              break;
+
+            case 'ui':
+              log.info({ function: step.function }, "Executing UI step.");
+              result = await functionToExecute({
+                page: page, // Pass the Playwright page object
+                params: params,
+                flowContext: flowContext
+              });
+              break;
+            
+            // You could add other types here in the future, e.g., 'database', 'ssh'
+            default:
+              throw new Error(`Unsupported step type: '${step.type}'`);
+          }
+        });
+
+        // 4. Post-execution processing (same for all types)
+        const responseData = (result && result.json) ? await result.json() : result;
+        stepHistory[step.step_id] = { request: params, response: responseData };
+        
+        // 5. Assertions and saving variables
+        if (params.expected) {
+          await assertResponse(result, params.expected);
+        }
+        if (result && result.ok && step.save_from_response) {
+          processSaveFromResponse(responseData, step.save_from_response, flowContext);
+        }
+      });
+    }
+  });
+}
+```
+
+#### **3. The Universal Function Signature**
+
+To make this work seamlessly, all registered functions (both UI and API) should adhere to a similar signature. They will accept a single object containing their required context.
+
+**API Function Signature:**
+📁 `src/functions/api/standard/sendRequest.ts`
+```typescript
+export async function sendRequest({ apiRequest, params }) {
+  // `apiRequest` is the pre-authenticated Playwright APIRequestContext
+  // `params` contains the resolved endpoint, method, payload, etc.
+  // ...
+  return await apiRequest[params.method.toLowerCase()]...;
+}
+```
+
+**UI Function Signature:**
+📁 `src/functions/ui/custom/validateQuoteDetails.ts`
+```typescript
+import { QuotePage } from '@/pages/quote-page';
+
+export async function validateQuoteDetails({ page, params, flowContext }) {
+  // `page` is the Playwright Page object
+  // `params` might contain expected values (e.g., from the API response)
+  // `flowContext` contains variables saved from previous steps
+
+  const quotePage = new QuotePage(page);
+  const expectedQuoteId = flowContext.createdQuoteId; // Get ID from previous API step
+
+  await expect(quotePage.quoteIdHeader).toHaveText(expectedQuoteId);
+  // ... more UI validations
+  
+  // A UI function might not return anything, or it might scrape data from the page.
+  return { status: 'validated' }; 
+}
+```
+
+### **Summary of the Hybrid Design**
+
+*   **Agnostic Core (`executeFlow`):** The main executor doesn't know how to send an API request or click a button. It only knows how to read the YAML, load parameters, and call the correct registered function with the correct context (`page` or `authedRequest`).
+*   **`type` is the Switch:** The `type` field in the YAML step is the critical piece of metadata that controls which context is passed to the function.
+*   **Universal Function Registry:** The `functionRegistry` is the heart of the plug-and-play system. To add a new capability, you simply write a new function that expects the appropriate context (`{ page, params }` or `{ apiRequest, params }`) and register it.
+*   **Seamless Chaining:** The `flowContext` and `stepHistory` are shared across *all* steps, regardless of their type. This means a UI step can easily access data saved from a previous API step, and vice-versa, enabling true end-to-end hybrid testing.
+
+This design fully abstracts the execution logic, creating a powerful, scalable, and maintainable engine ready for any type of test you want to support in the future.
