@@ -344,3 +344,209 @@ async function sendRequest(request: APIRequestContext, testCase: TestCase): Prom
 6.  **Keep Allure focused on the test narrative:** The steps, the data in/out (attachments), and the final result.
 
 This approach ensures your Allure reports remain clean and high-level, while your console/file logs provide the rich, detailed context needed to instantly diagnose any issues.
+
+
+-------
+
+Of course. This is a critical step for making the framework truly enterprise-ready. A robust file logging system is essential for debugging CI/CD runs where you can't see the live console output. We will implement a solution that creates detailed, structured JSON logs that are perfectly suited for parallel execution.
+
+### The Architectural Plan
+
+1.  **Unique Log Directory Per Run:** To keep logs organized, every test run (e.g., `npm run test:bop:sit:partner_a`) will create a single, timestamped directory (e.g., `logs/2023-10-27T10-30-00Z/`).
+2.  **One Log File Per Worker:** This is the key to safe parallel execution. Each Playwright worker process will write to its own separate log file within the run directory (e.g., `worker-0.log`, `worker-1.log`). This completely prevents corrupted log files from concurrent writes.
+3.  **Structured JSON Logging:** Logs written to the file will be in JSON format. This includes the log level, timestamp, message, and any extra context (like `testId`), making them easy to parse and query with log analysis tools.
+4.  **Logger via Fixture:** We will create a new Playwright fixture named `log`. This is the most robust and elegant solution. The fixture will be responsible for creating a logger instance that is pre-configured for the specific worker and test it's running in. This allows us to automatically inject context like `testId` into every log message.
+5.  **Configuration via Environment Variable:** File logging will be disabled by default and can be enabled by setting `LOG_TO_FILE=true` in the environment.
+
+---
+
+### Step 1: Update `global.setup.ts` to Create the Log Directory
+
+The global setup is the perfect place to create the timestamped directory for the entire test run.
+
+📁 **`tests/global.setup.ts`** (Updated)
+```typescript
+// ... (imports) ...
+
+async function globalSetup(config: FullConfig) {
+  console.log('--- Running Global Setup ---');
+
+  // ... (logic to parse argv and save run_config.json) ...
+
+  // --- NEW: Create a unique, timestamped directory for this run's logs ---
+  const runTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  process.env.RUN_TIMESTAMP = runTimestamp; // Make timestamp available to workers
+  const logDir = path.join(__dirname, '..', 'logs', runTimestamp);
+  
+  fs.mkdirSync(logDir, { recursive: true });
+  console.log(`Log directory for this run created at: ${logDir}`);
+  // --- END NEW ---
+}
+
+export default globalSetup;
+```
+
+### Step 2: Update the Logger Utility (`logger.ts`)
+
+This file will no longer export a logger instance. Instead, it will export a `pino` configuration factory that our new fixture will use.
+
+📁 **`src/helpers/logger.ts`** (Refactored)
+```typescript
+import pino from 'pino';
+
+// This function creates the configuration for the console transport (pino-pretty)
+const getConsoleTransport = () => ({
+  target: 'pino-pretty',
+  options: {
+    colorize: true,
+    translateTime: 'SYS:yyyy-mm-dd HH:MM:ss',
+    ignore: 'pid,hostname,name,testId', // Let the child logger name and testId show in the JSON file log
+  },
+});
+
+// This function creates the configuration for the file transport
+const getFileTransport = (logPath: string) => ({
+  target: 'pino/file',
+  options: { destination: logPath, mkdir: true },
+});
+
+/**
+ * Creates a new Pino logger instance with configured transports.
+ * @param workerId The index of the Playwright worker.
+ * @returns A new Logger instance.
+ */
+export const initializeLogger = (workerId?: number) => {
+  const isFileLoggingEnabled = process.env.LOG_TO_FILE === 'true';
+  const runTimestamp = process.env.RUN_TIMESTAMP;
+
+  const transports = [];
+  transports.push(getConsoleTransport());
+
+  if (isFileLoggingEnabled && runTimestamp) {
+    const logPath = `logs/${runTimestamp}/worker-${workerId ?? 'main'}.log`;
+    transports.push(getFileTransport(logPath));
+  }
+
+  // pino.multistream is deprecated in favor of pino.transport with multiple targets
+  return pino({
+    level: process.env.LOG_LEVEL || 'info',
+    transport: {
+      targets: transports,
+    },
+  });
+};
+```
+
+### Step 3: Create the Logger Fixture (`test-fixtures.ts`)
+
+This is the core of the new logging system. We will add a `log` fixture that provides a ready-to-use, context-aware logger to every test.
+
+📁 **`src/helpers/test-fixtures.ts`** (Updated)
+```typescript
+import { test as baseTest, expect, APIRequestContext, Logger } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as dotenv from 'dotenv';
+import { initializeLogger } from './logger'; // <-- Import the new initializer
+
+dotenv.config();
+
+// ... (getAuthFilePath and MyProjectOptions interface remain the same) ...
+
+// Define the shape of our new fixtures, including the logger
+interface MyFixtures {
+  authedRequest: APIRequestContext;
+  log: Logger; // <-- Add the log fixture
+}
+
+export const test = baseTest.extend<MyFixtures, MyProjectOptions>({
+  // --- NEW: Logger Fixture ---
+  log: [async ({}, use, testInfo) => {
+    // Create a logger instance specific to this worker
+    const logger = initializeLogger(testInfo.workerIndex);
+    
+    // Create a child logger that automatically includes the test title
+    const childLogger = logger.child({ testTitle: testInfo.title });
+    await use(childLogger);
+  }, { scope: 'test' }], // A new logger is created for each test
+
+  // --- Updated: authedRequest Fixture ---
+  authedRequest: async ({ playwright, log }, use, testInfo) => { // <-- It can now use the `log` fixture
+    const productName = testInfo.project.use.productName;
+    const env = process.env.ENV!;
+    const partner = process.env.PARTNER!;
+
+    log.info(`Setting up authenticated request for product '${productName}'...`);
+    
+    // ... (rest of the authedRequest logic is the same) ...
+    // You can now use `log.debug`, `log.info`, etc. inside this fixture
+  },
+});
+
+export { expect };
+```
+
+### Step 4: Update All Files to Use the Logger Fixture
+
+Now, refactor all test files (`*.setup.ts`, `test-executor.ts`) to get the logger from the test function's arguments instead of creating it themselves.
+
+**Example: `bop.auth.setup.ts`**
+```typescript
+// IMPORTANT: Use our custom test object which includes the new log fixture
+import { test as setup, expect } from '../../helpers/test-fixtures';
+import * as fs from 'fs';
+import * as path from 'path';
+// We no longer need to import or create a logger here
+
+const productName = 'bop';
+export const AUTH_FILE = /* ... */;
+
+// Destructure 'log' from the setup function arguments
+setup(`authenticate ${productName}`, async ({ request, log }) => {
+  log.info("Starting authentication setup..."); // Use the logger directly
+  // ... all other `console.log` calls should be replaced with `log.info`, `log.debug`, etc.
+});
+```
+
+**Example: `test-executor.ts`**
+```typescript
+// Use our custom test fixture
+import { test, expect } from '@/helpers/test-fixtures';
+
+// REMOVE the global logger instance
+// const log = createLogger('TestExecutor'); // DELETE THIS LINE
+
+// ...
+
+// Update the test function signature to receive 'log'
+test(testCase.description, { tag: testCase.tags || [] }, async ({ request, authedRequest, log }) => {
+  // Now you can use 'log' directly inside the test
+  log.info({ testId: testCase.test_id }, "Executing test case.");
+  // ...
+});
+
+// Update helper functions to accept the logger instance as an argument
+async function assertBody(actualBody: any, expectedBody: ExpectedOutput['body'], log: Logger) {
+  // ... use log.warn, log.error, etc.
+}
+```
+You would continue this pattern, passing the `log` object from the main test block down into any helper functions (`assertBody`, `processSaveFromResponse`, etc.) that need to log information.
+
+### How to Use It
+
+1.  **Run normally:** `npm run test:bop:sit:partner_a`
+    *   You will see color-coded logs in your console.
+    *   No log files will be created.
+
+2.  **Run with File Logging:**
+    ```bash
+    cross-env LOG_TO_FILE=true npm run test:bop:sit:partner_a
+    ```
+    *   You will see the same console logs.
+    *   A new directory will be created, e.g., `logs/2023-10-27T12-00-00-000Z/`.
+    *   Inside, you will find files like `worker-0.log`, `worker-1.log`, etc.
+    *   The content of `worker-0.log` will be structured JSON, perfect for analysis:
+        ```json
+        {"level":30,"time":1678890000123,"name":"TestExecutor","testTitle":"Create a quote with a new, unique transaction ID @smoke","msg":"Executing test case","testId":"TC-BOP-001"}
+        {"level":40,"time":1678890000456,"name":"TestExecutor","testTitle":"...","msg":"[Chaining] Could not find path 'data.nonexistent'..."}
+        ```
