@@ -270,3 +270,91 @@ export function executeApiTests(definitionYamlPath: string, expectedJsonPath: st
     *   The `npm` scripts that use `--grep` will work perfectly with this new, correct implementation. Playwright's `grep` is designed to filter based on both the title (for flows) and the `tag` option (for individual tests).
 
 Thank you for pointing this out and holding the framework to a higher standard. This implementation is much cleaner and properly utilizes the features Playwright provides.
+
+
+
+Of course. That is an excellent suggestion for making the Allure reports cleaner and more professional. Using dedicated Allure tags instead of embedding them in the description title is a much better practice.
+
+We will use `allure.tag()` to apply the tags from your YAML file.
+
+---
+
+### **The Code: Updating `test-executor.ts`**
+
+The change is very small and only affects the main test executor functions, `executeApiFlows` and `executeApiTests`.
+
+📁 **`src/core/test-executor.ts`** (Updated `executor` functions)
+```typescript
+// ... (imports) ...
+import { allure } from 'allure-playwright';
+
+// ... (interfaces remain the same, with the `tags?: string[]` property) ...
+
+// --- Main Executor for Flows (Updated) ---
+export function executeApiFlows(flowYamlPath: string) {
+  // ... (logic to load flow file) ...
+
+  // The describe block title is now clean.
+  test.describe.serial(`API Flow: ${flow.description}`, () => {
+    
+    // --- NEW: Apply Allure Tags for the whole flow ---
+    if (flow.tags) {
+      // Remove the "@" symbol before applying the tag
+      const cleanTags = flow.tags.map(tag => tag.replace(/^@/, ''));
+      allure.tags(...cleanTags);
+    }
+    // --- END NEW ---
+
+    // ... (rest of the flow logic is unchanged) ...
+    for (const step of flow.steps) {
+      test(step.description, async ({ request, authedRequest }) => {
+        // ...
+      });
+    }
+  });
+}
+
+// --- Main Executor for Standalone Tests (Updated) ---
+export function executeApiTests(definitionYamlPath: string, expectedJsonPath: string) {
+  // ... (logic to load test cases) ...
+
+  // The describe block title is clean.
+  test.describe(`API Tests for ${path.basename(definitionYamlPath)}`, () => {
+    test.describe.configure({ mode: 'parallel' });
+
+    for (const testCase of testCases) {
+      // ... (logic for handling malformed test cases) ...
+
+      // Pass the tags to the test options object as before.
+      // The test title remains clean.
+      test(testCase.description, { tag: testCase.tags || [] }, async ({ request, authedRequest }) => {
+        
+        // --- NEW: Apply Allure Tags for this specific test case ---
+        if (testCase.tags) {
+          // Remove the "@" symbol before applying the tag
+          const cleanTags = testCase.tags.map(tag => tag.replace(/^@/, ''));
+          allure.tags(...cleanTags);
+        }
+        // --- END NEW ---
+        
+        // ... (rest of the test logic is unchanged)
+        await allure.id(testCase.test_id);
+        // ...
+      });
+    }
+  });
+}
+
+// All other helper functions (sendRequest, assertBody, etc.) remain unchanged.
+```
+
+### **Summary of the Improvement**
+
+1.  **`allure.tags(...tags)`:** We now use the dedicated `allure.tags()` function. It accepts one or more strings as arguments, which is why we use the spread operator (`...`) on our array of cleaned tags.
+2.  **Clean Tagging:** We use a simple `.map()` and `.replace(/^@/, '')` to remove the leading `@` symbol from each tag before passing it to Allure. This is good practice because the `@` is a convention for `grep`, but the Allure tag itself doesn't need it.
+3.  **Clean Test Titles:**
+    *   In `executeApiFlows`, the `describe` title is now clean and doesn't have the tags appended.
+    *   In `executeApiTests`, we continue to use Playwright's native `tag` option, which also keeps the test title clean.
+4.  **Improved Allure Report:** In your generated Allure report, you will now see proper, clickable tag labels in the "Behaviors" tab and on each test case page, separate from the test title. This makes filtering and organizing within the Allure UI much more effective.
+
+This change aligns the framework more closely with Allure's features and provides a much better reporting experience.
