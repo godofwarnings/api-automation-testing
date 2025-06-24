@@ -550,3 +550,182 @@ You would continue this pattern, passing the `log` object from the main test blo
         {"level":30,"time":1678890000123,"name":"TestExecutor","testTitle":"Create a quote with a new, unique transaction ID @smoke","msg":"Executing test case","testId":"TC-BOP-001"}
         {"level":40,"time":1678890000456,"name":"TestExecutor","testTitle":"...","msg":"[Chaining] Could not find path 'data.nonexistent'..."}
         ```
+
+
+
+
+You are absolutely right to call this out. Those are classic and very frustrating TypeScript type mismatch errors. My apologies for providing code that led to them.
+
+The root cause is a mismatch between the generic `Logger` type that Playwright provides in its fixture context and the specific, richer `Logger` type that the `pino` library creates.
+
+Let's fix this properly by creating a clean, strongly-typed system.
+
+---
+
+### **The Fix: Strong Typing for Our Custom Logger**
+
+We will define our own `Logger` type that matches the `pino` instance and ensure it's used consistently throughout the framework. This will resolve all the type errors.
+
+#### **Step 1: Update the Logger Utility (`logger.ts`)**
+
+We will export the `pino.Logger` type directly and rename our initializer for clarity.
+
+📁 **`src/helpers/logger.ts`** (Corrected)
+```typescript
+import pino from 'pino';
+
+// Define and export the specific Logger type we are using.
+// This ensures type consistency everywhere.
+export type AppLogger = pino.Logger;
+
+const getConsoleTransport = () => ({
+  target: 'pino-pretty',
+  options: { /* ... */ },
+});
+
+const getFileTransport = (logPath: string) => ({
+  target: 'pino/file',
+  options: { destination: logPath, mkdir: true },
+});
+
+/**
+ * Creates the primary pino logger instance for a test worker.
+ * @param workerId The index of the Playwright worker.
+ */
+export function createWorkerLogger(workerId?: number): AppLogger {
+  const isFileLoggingEnabled = process.env.LOG_TO_FILE === 'true';
+  const runTimestamp = process.env.RUN_TIMESTAMP;
+  const transports = [getConsoleTransport()];
+
+  if (isFileLoggingEnabled && runTimestamp) {
+    const logPath = `logs/${runTimestamp}/worker-${workerId ?? 'main'}.log`;
+    transports.push(getFileTransport(logPath));
+  }
+
+  return pino({
+    level: process.env.LOG_LEVEL || 'info',
+    transport: {
+      targets: transports,
+    },
+  });
+}
+```
+
+#### **Step 2: Update the Test Fixture (`test-fixtures.ts`)**
+
+This is the most critical change. We will use our new `AppLogger` type and correctly type the fixture.
+
+📁 **`src/helpers/test-fixtures.ts`** (Corrected)
+```typescript
+import { test as baseTest, expect, APIRequestContext } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as dotenv from 'dotenv';
+import { createWorkerLogger, AppLogger } from './logger'; // <-- Import our specific types
+
+dotenv.config();
+
+// ... (getAuthFilePath and MyProjectOptions interface remain the same) ...
+
+// Define the shape of our new fixtures, using our custom logger type.
+interface MyFixtures {
+  authedRequest: APIRequestContext;
+  log: AppLogger; // <-- Use our strongly-typed AppLogger
+}
+
+export const test = baseTest.extend<MyFixtures, MyProjectOptions>({
+  // --- Logger Fixture (Correctly Typed) ---
+  log: [async ({}, use, testInfo) => {
+    // This creates the main logger for the worker.
+    const workerLogger = createWorkerLogger(testInfo.workerIndex);
+    
+    // Create a child logger that automatically includes test-specific context.
+    const testLogger = workerLogger.child({ 
+      testId: testInfo.title.match(/TC-[\w-]+/)?.[0], // Example: extract a test case ID
+      testTitle: testInfo.title,
+    });
+    
+    // Provide this specific child logger to the test.
+    await use(testLogger);
+  }, { scope: 'test' }],
+
+  // --- Updated authedRequest Fixture ---
+  authedRequest: async ({ playwright, log }, use, testInfo) => { // 'log' is now correctly typed
+    const productName = testInfo.project.use.productName;
+    
+    log.info(`Setting up authenticated request for product '${productName}'...`);
+    
+    // ... rest of the authedRequest logic is the same ...
+  },
+});
+
+export { expect };
+```
+
+#### **Step 3: Update `test-executor.ts` to Pass the Logger**
+
+The final piece is to ensure that any helper functions that need to log receive the `log` object as an argument.
+
+📁 **`src/core/test-executor.ts`** (Updated)
+```typescript
+import { test, expect } from '@/helpers/test-fixtures';
+import { AppLogger } from '@/helpers/logger'; // <-- Import our logger type
+// ... other imports
+
+// Remove the global logger instance
+// const log = createLogger('TestExecutor'); // DELETE THIS
+
+// --- Update the test function signature ---
+test(testCase.description, { tag: testCase.tags || [] }, async ({ request, authedRequest, log }) => {
+  // `log` is now available and correctly typed here.
+
+  // --- Update calls to helper functions ---
+  // Any helper that logs must now accept the logger as a parameter.
+  await assertBody(responseBody, expected.body, log); 
+});
+
+// --- Update helper function signatures ---
+
+/**
+ * Asserts the response body, using the provided logger for warnings.
+ */
+async function assertBody(actualBody: any, expectedBody: ExpectedOutput['body'], log: AppLogger) { // <-- Accept log
+  if (expectedBody === undefined) return;
+
+  await allure.step('[Assert] Response Body', async () => {
+    // ...
+    if (typeof actualBody !== 'object' || actualBody === null) {
+      const errorMessage = `Type mismatch: Expected body to be an object, but received type '${typeof actualBody}'.`;
+      log.error({ actualBody }, errorMessage); // Use the passed-in logger
+      throw new Error(errorMessage);
+    }
+    // ...
+  });
+}
+
+/**
+ * Processes saving variables from the request, using the provided logger.
+ */
+function processSaveFromRequest(resolvedPayload: any, rules: Record<string, string>, flowContext: Record<string, any>, log: AppLogger) { // <-- Accept log
+  // ...
+  if (!resolvedPayload || typeof resolvedPayload !== 'object') {
+    log.warn(`Cannot save from request because the payload is not a valid object.`);
+    return;
+  }
+  // ...
+}
+
+// You would apply this pattern to all other helper functions:
+// - processSaveFromResponse
+// - saveResponseBodyToFile
+// Make sure to update their signatures and pass the `log` object from the main test block.
+```
+
+### **Summary of Fixes**
+
+1.  **`AppLogger` Type:** We created our own `AppLogger` type alias for `pino.Logger`. This ensures that TypeScript knows exactly what methods (`.info()`, `.warn()`, etc.) are available on our logger objects.
+2.  **Correct Fixture Typing:** The `log` fixture in `test-fixtures.ts` is now explicitly typed with `AppLogger`, resolving the "property does not exist" errors.
+3.  **Child Logger Context:** The `log` fixture now creates a *child logger* for each test. This is a `pino` best practice that efficiently adds context (like the `testTitle`) to every single log message generated during that test, making your file logs much easier to filter and analyze.
+4.  **Dependency Injection:** The pattern is now clear: the `log` fixture is created once per test, and it must be **passed as an argument** to any helper function that needs to perform logging. This is a clean, scalable dependency injection pattern.
+
+These changes will resolve the TypeScript errors and provide a much more robust and well-structured logging system.
