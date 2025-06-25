@@ -189,3 +189,236 @@ The `ApiAction` class should focus on the core action. The high-level orchestrat
     *   **`handleApiResponse`:** A dedicated utility for the cross-cutting concern of processing and saving a response.
 
 This architecture is now much more robust, correctly typed, and fully featured, incorporating all the powerful capabilities we've built while maintaining a clean and logical structure.
+
+
+# 2
+
+You are absolutely right. I apologize for misinterpreting the architecture. Your vision is much cleaner and follows a better separation of concerns.
+
+You want:
+*   The **Orchestrator** to be dumb and high-level. It just calls the function and processes the results for chaining.
+*   The **Function** (wrapped by the `ApiAction` class in our standard case) to be smart. It should be fully responsible for its own execution, including sending the request, attaching all evidence to Allure, saving files, and performing assertions.
+
+This is a superior design. It makes the functions truly self-contained and powerful, and simplifies the orchestrator's logic immensely. Let's implement this correctly.
+
+---
+
+### **The Corrected Architecture: Smart Functions, Lean Orchestrator**
+
+#### **Step 1: The New, Powerful `ApiAction` Base Class**
+
+This class will now contain almost all the logic we previously had in the orchestrator's helper functions. It becomes a self-sufficient unit of execution.
+
+📁 **`src/functions/base/ApiAction.ts`** (The New Core Logic)
+```typescript
+import { APIRequestContext, APIResponse, test } from '@playwright/test';
+import { allure } from 'allure-playwright';
+import * as fs from 'fs';
+import * as path from 'path';
+import { log } from '../../helpers/logger';
+import { tryParseJson, getValueFromObject, resolvePlaceholdersInString } from '../../helpers/utils';
+import { ApiError } from '../../helpers/errors';
+import { DIRECTORIES } from '../../../constants/framework';
+
+// --- Interfaces remain the same ---
+export interface SaveResponseBodyConfig { /* ... */ }
+export interface ApiActionParams { /* ... */ }
+
+/**
+ * A robust, self-contained base class for all standard API actions.
+ * It handles request sending, Allure reporting, assertions, and file saving.
+ */
+export class ApiAction {
+  protected apiRequest: APIRequestContext;
+  protected params: ApiActionParams;
+  protected masterContext: any;
+  protected response!: APIResponse; // Will be initialized during run()
+  protected responseBody: any;
+
+  constructor(apiRequest: APIRequestContext, params: ApiActionParams, masterContext: any) {
+    this.apiRequest = apiRequest;
+    this.params = params;
+    this.masterContext = masterContext;
+  }
+
+  // --- Protected Helper Methods ---
+  protected async buildHeaders(): Promise<Record<string, string>> { /* ... (no change) */ }
+  
+  protected getContentTypeDetails(): { extension: string, mimeType: string } {
+    const contentType = this.response.headers()['content-type'] || 'application/octet-stream';
+    if (contentType.includes('json')) return { extension: 'json', mimeType: 'application/json' };
+    if (contentType.includes('pdf')) return { extension: 'pdf', mimeType: 'application/pdf' };
+    // ... other types ...
+    return { extension: 'bin', mimeType: 'application/octet-stream' };
+  }
+
+  // --- Core Lifecycle Methods ---
+
+  /**
+   * Sends the request and attaches evidence to Allure.
+   */
+  protected async execute(): Promise<APIResponse> {
+    const { method, endpoint, payload: rawPayload } = this.params;
+    const finalHeaders = await this.buildHeaders();
+    const options: { headers: any; data?: any; jsonData?: any; } = { headers: finalHeaders };
+    // ... logic to prepare options.data/jsonData ...
+    
+    await allure.step(`[Request] ${method} ${endpoint}`, async () => {
+      await allure.attachment('Request Headers', JSON.stringify(finalHeaders, null, 2), { contentType: 'application/json' });
+      // ... logic to attach request payload ...
+    });
+
+    return this.apiRequest[method.toLowerCase() as 'post'](endpoint, options);
+  }
+
+  /**
+   * Asserts the response and attaches response details to Allure.
+   * This is the new "handleApiResponse" logic.
+   */
+  protected async assertAndReport() {
+    const expected = this.params.expected || { status: 200 };
+
+    await allure.step(`[Response] Status: ${this.response.status()} (Expected: ${expected.status})`, async () => {
+      // Attach all response details within this step
+      await allure.attachment('Response Headers', JSON.stringify(this.response.headers(), null, 2), { contentType: 'application/json' });
+      
+      const bodyBuffer = await this.response.body();
+      if (bodyBuffer.length > 0) {
+        const { extension, mimeType } = this.getContentTypeDetails();
+        await allure.attachment(`Response Body.${extension}`, bodyBuffer, { contentType: mimeType });
+        if (!mimeType.includes('pdf') && !mimeType.includes('image')) {
+          this.responseBody = tryParseJson(bodyBuffer.toString('utf8'));
+        }
+      }
+
+      // Perform the assertion
+      if (this.response.status() !== expected.status) {
+        throw new ApiError(`Status code mismatch`, this.response.status(), this.responseBody);
+      }
+      test.expect(this.response.status()).toBe(expected.status);
+
+      if (expected.body) {
+        // Here you would call your standalone assertBody helper
+        // await assertBody(this.responseBody, expected.body, log);
+      }
+    });
+  }
+
+  /**
+   * Saves the response body to a file if configured.
+   */
+  protected async saveBody() {
+    if (!this.params.save_response_body?.enabled) return;
+    
+    const bodyBuffer = await this.response.body();
+    // ... (full implementation of saveResponseBodyToFile logic from before) ...
+  }
+
+  /**
+   * The main "run" method that orchestrates the action.
+   */
+  public async run() {
+    this.response = await this.execute();
+    await this.assertAndReport();
+    await this.saveBody();
+    
+    // Return a structured result for the orchestrator
+    return {
+      status: this.response.status(),
+      ok: this.response.ok(),
+      headers: this.response.headers(),
+      responseBody: this.responseBody,
+    };
+  }
+}
+```
+
+#### **Step 2: The `standard.api.sendRequest` Function**
+
+This function remains a simple wrapper. Its only job is to instantiate the class and run it.
+
+📁 **`src/functions/api/standard/sendRequest.ts`** (Updated)
+```typescript
+import { ApiAction, ApiActionParams } from '../../base/ApiAction';
+
+export async function sendRequest(context: any, params: ApiActionParams, masterContext: any) {
+  const apiAction = new ApiAction(context.api, params, masterContext);
+  return apiAction.run();
+}
+```
+
+#### **Step 3: The New, Lean `flow-orchestrator.ts`**
+
+The orchestrator is now dramatically simpler and cleaner, just as you envisioned.
+
+📁 **`src/core/flow-orchestrator.ts`** (Updated)
+```typescript
+// ... (imports) ...
+
+export function executeFlow(flowPath: string) {
+  // ... (logic to load flow, setup describe block, and apply tags)
+  
+  test.describe.serial(`Flow: ${flow.description} ${playwrightTags}`, () => {
+    const flowContext: Record<string, any> = {};
+    const stepHistory: Record<string, any> = {};
+
+    for (const step of flow.steps) {
+      test(step.description, async ({ request, authedRequest }) => {
+        await allure.step(`Executing Step: "${step.description}"`, async () => {
+          log.info({ stepId: step.step_id, function: step.function }, "Starting step execution.");
+
+          // 1. Prepare contexts
+          const masterContext = { flow: flowContext, steps: stepHistory };
+          const executionContext = { api: authedRequest, log }; // No UI page for now
+
+          // 2. Load and Resolve Parameters
+          const paramsPath = path.join(process.cwd(), step.parameters_file);
+          const params = JSON.parse(fs.readFileSync(paramsPath, 'utf8'));
+          const resolvedParams = resolvePlaceholdersIn(params, masterContext);
+          
+          // 3. Save from the resolved request if needed
+          if (resolvedParams.payload && step.save_from_request) {
+            processSaveFromRequest(resolvedParams, step.save_from_request, flowContext);
+          }
+
+          // 4. Get and Execute the Function
+          const func = functionRegistry.get(step.function);
+          const result = await func(executionContext, resolvedParams, masterContext);
+
+          // 5. Save the result to history
+          stepHistory[step.step_id] = result;
+
+          // 6. Save from response if needed
+          if (result.ok && result.responseBody && step.save_from_response) {
+            processSaveFromResponse(result.responseBody, step.save_from_response, flowContext);
+          }
+        });
+      });
+    }
+  });
+}
+
+// These helper functions for chaining still belong to the orchestrator,
+// as they manage the flow's state.
+function processSaveFromRequest(...) { /* ... */ }
+function processSaveFromResponse(...) { /* ... */ }
+```
+
+### **Summary of the Corrected Architecture**
+
+*   **Orchestrator's Role (Lean):**
+    *   Manages the sequence of steps (`for` loop).
+    *   Manages the state between steps (`flowContext`, `stepHistory`).
+    *   Resolves placeholders to prepare parameters.
+    *   Calls the appropriate function.
+    *   **It does NOT know how to assert, save files, or attach things to Allure.**
+
+*   **Function's Role (`ApiAction` - Smart):**
+    *   Receives its parameters.
+    *   Builds and sends the request.
+    *   **Attaches all request/response evidence to Allure.**
+    *   **Performs all assertions.**
+    *   **Saves the response body to a file if requested.**
+    *   Returns a simple, structured result object.
+
+This is a much cleaner, more scalable, and more object-oriented design. The `ApiAction` class is now a powerful, self-contained unit of work, and the orchestrator is a lean and focused engine. This perfectly reflects your directive.
