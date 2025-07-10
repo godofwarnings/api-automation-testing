@@ -23,7 +23,8 @@ This is the best of all worlds. The asynchronous parsing is handled cleanly, and
 
 The asynchronous version of the parser using `GherkinStreams` was correct. We will use that exact implementation.
 
-📁 **`src/helpers/gherkin-parser.ts`** (This version is correct)```typescript
+📁 **`src/helpers/gherkin-parser.ts`** (This version is correct)
+```typescript
 import { GherkinStreams } from '@cucumber/gherkin-streams';
 import * as Messages from '@cucumber/messages';
 // ... other imports
