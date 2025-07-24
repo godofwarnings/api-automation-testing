@@ -29,7 +29,8 @@ npm install --save-dev @types/xpath @types/xmldom
 
 Here is how a user would define an XPath extraction in their step library or test case data.
 
-📁 `library/api_step_library.yml` (Example with `save_from_response_xml`)```yaml
+📁 `library/api_step_library.yml` (Example with `save_from_response_xml`)
+```yaml
 get_quote_details_xml:
   description: "Retrieve quote details as an XML document"
   function: "standard.api.sendRequest"
